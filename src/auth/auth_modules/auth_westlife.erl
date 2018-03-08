@@ -8,12 +8,10 @@
 
 -include_lib("ctool/include/logging.hrl").
 -include("auth_common.hrl").
--include("datastore/oz_datastore_models_def.hrl").
-
--define(PROVIDER_ID, westlife).
+-include("datastore/oz_datastore_models.hrl").
 
 %% API
--export([get_redirect_url/1, validate_login/0, get_user_info/1]).
+-export([get_redirect_url/2, validate_login/1, get_user_info/2]).
 
 %%%===================================================================
 %%% API functions
@@ -24,11 +22,9 @@
 %% See function specification in auth_module_behaviour.
 %% @end
 %%--------------------------------------------------------------------
--spec get_redirect_url(boolean()) -> {ok, binary()} | {error, term()}.
-get_redirect_url(ConnectAccount) ->
-    auth_oauth2_common:get_redirect_url(
-        ConnectAccount, ?PROVIDER_ID, ?MODULE
-    ).
+-spec get_redirect_url(auth_utils:idp(), boolean()) -> {ok, binary()} | {error, term()}.
+get_redirect_url(IdP, ConnectAccount) ->
+    auth_oauth2_common:get_redirect_url(ConnectAccount, IdP).
 
 
 %%--------------------------------------------------------------------
@@ -36,11 +32,11 @@ get_redirect_url(ConnectAccount) ->
 %% See function specification in auth_module_behaviour.
 %% @end
 %%--------------------------------------------------------------------
--spec validate_login() ->
+-spec validate_login(auth_utils:idp()) ->
     {ok, #linked_account{}} | {error, term()}.
-validate_login() ->
+validate_login(IdP) ->
     auth_oauth2_common:validate_login(
-        ?PROVIDER_ID, secret_over_http_basic, access_token_in_header
+        IdP, secret_over_http_basic, access_token_in_header
     ).
 
 
@@ -49,9 +45,9 @@ validate_login() ->
 %% Retrieves user info from oauth provider based on access token.
 %% @end
 %%--------------------------------------------------------------------
--spec get_user_info(AccessToken :: binary()) ->
+-spec get_user_info(auth_utils:idp(), AccessToken :: binary()) ->
     {ok, #linked_account{}} | {error, bad_access_token}.
-get_user_info(AccessToken) ->
+get_user_info(IdP, AccessToken) ->
     auth_oauth2_common:get_user_info(
-        ?PROVIDER_ID, access_token_in_url, AccessToken
+        IdP, access_token_in_url, AccessToken
     ).
