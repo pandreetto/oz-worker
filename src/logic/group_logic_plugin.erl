@@ -156,6 +156,8 @@ create(Req = #el_req{gri = #gri{id = undefined, aspect = join}}) ->
                 od_group, GroupId,
                 Privileges
             );
+        ?AS_GROUP(GroupId) ->
+            throw(?ERROR_CANNOT_JOIN_GROUP_TO_ITSELF);
         ?AS_GROUP(ChildGroupId) ->
             entity_graph:add_relation(
                 od_group, ChildGroupId,
@@ -474,6 +476,7 @@ authorize(Req = #el_req{operation = create, gri = #gri{aspect = join}}, _) ->
         {?USER(UserId), ?AS_USER(UserId)} ->
             true;
         {?USER(UserId), ?AS_GROUP(ChildGroupId)} ->
+%%            auth_by_privilege(UserId, ChildGroupId, ?GROUP_JOIN_PARENT); % TODO VFS-3351
             auth_by_privilege(UserId, ChildGroupId, ?GROUP_JOIN_GROUP);
         _ ->
             false
@@ -483,6 +486,7 @@ authorize(Req = #el_req{operation = create, gri = #gri{aspect = invite_user_toke
     auth_by_privilege(Req, Group, ?GROUP_INVITE_USER);
 
 authorize(Req = #el_req{operation = create, gri = #gri{aspect = invite_group_token}}, Group) ->
+%%    auth_by_privilege(Req, Group, ?GROUP_INVITE_CHILD); % TODO VFS-3351
     auth_by_privilege(Req, Group, ?GROUP_INVITE_GROUP);
 
 authorize(Req = #el_req{operation = create, gri = #gri{aspect = {user, _}}}, _) ->
@@ -610,6 +614,7 @@ authorize(Req = #el_req{operation = delete, gri = #gri{aspect = {user, _}}}, Gro
 
 authorize(Req = #el_req{operation = delete, gri = #gri{aspect = {child, _}}}, Group) ->
     auth_by_privilege(Req, Group, ?GROUP_REMOVE_GROUP) orelse
+%%    auth_by_privilege(Req, Group, ?GROUP_REMOVE_CHILD) orelse % TODO VFS-3351
         user_logic_plugin:auth_by_oz_privilege(Req, ?OZ_GROUPS_REMOVE_MEMBERS);
 
 authorize(_, _) ->
@@ -628,7 +633,7 @@ authorize(_, _) ->
 -spec validate(entity_logic:req()) -> entity_logic:validity_verificator().
 validate(#el_req{operation = create, gri = #gri{aspect = instance}}) -> #{
     required => #{
-        <<"name">> => {binary, non_empty}
+        <<"name">> => {binary, name}
     },
     optional => #{
         <<"type">> => {atom, [organization, unit, team, role]}
@@ -678,7 +683,7 @@ validate(#el_req{operation = create, gri = #gri{aspect = {child, _}}}) -> #{
 
 validate(#el_req{operation = update, gri = #gri{aspect = instance}}) -> #{
     at_least_one => #{
-        <<"name">> => {binary, non_empty},
+        <<"name">> => {binary, name},
         <<"type">> => {atom, [organization, unit, team, role]}
     }
 };

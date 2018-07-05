@@ -120,8 +120,8 @@
 -define(USER_NAME1, <<"user1">>).
 -define(USER_NAME2, <<"user2">>).
 -define(USER_NAME3, <<"user3">>).
--define(USER_LOGIN1, <<"login1">>).
--define(USER_LOGIN2, <<"login2">>).
+-define(USER_ALIAS1, <<"alias1">>).
+-define(USER_ALIAS2, <<"alias2">>).
 
 %% Example test data for groups
 -define(GROUP_NAME1, <<"group1">>).
@@ -158,6 +158,7 @@
 -define(LATITUDE, 23.10).
 -define(LONGITUDE, 44.44).
 -define(DOMAIN, <<"multilevel.provider-domain.org">>).
+-define(UNIQUE_DOMAIN, ?UNIQUE_STRING).
 -define(SUB_DOMAIN, <<"prov-sub">>).
 -define(ADMIN_EMAIL, <<"admin@onedata.org">>).
 -define(PROVIDER_NAME1, <<"provider1">>).
@@ -171,7 +172,7 @@
         <<"longitude">> => rand:uniform() * 180
     }
 ).
--define(PROVIDER_DETAILS(ProviderName), ?PROVIDER_DETAILS(ProviderName, ?DOMAIN)).
+-define(PROVIDER_DETAILS(ProviderName), ?PROVIDER_DETAILS(ProviderName, ?UNIQUE_DOMAIN)).
 
 %% Example test data for handle services
 -define(HANDLE_SERVICE_NAME1, <<"LifeWatch DataCite">>).
@@ -262,4 +263,21 @@
     }
 ).
 
+-define(BAD_VALUES_NAME(Error),
+    [{<<"name">>, <<"">>, Error},
+    {<<"name">>, <<"a">>, Error},
+    {<<"name">>, <<"-asd">>, Error},
+    {<<"name">>, <<"/asd">>, Error},
+    {<<"name">>, <<":asd">>, Error},
+    {<<"name">>, <<"asd★">>, Error},
+    {<<"name">>, <<"asd-">>, Error},
+    {<<"name">>, <<"very_very_very_long_name_with_at_lest_50_characters">>, Error},
+    {<<"name">>, <<".asd">>, Error},
+    {<<"name">>, <<"asd ">>, Error},
+    {<<"name">>, 1234, ?ERROR_BAD_VALUE_BINARY(<<"name">>)}]).
 -endif.
+
+-define(CORRECT_NAME, <<"_πœę ßþą_śðæŋ-əłżź.ćńµジ(ャパル)パスで 日本を- 旅す.る()"/utf8>>).
+
+-define(CORRECT_USER_NAME, <<"πœęßパル-µńćźżąśð日本を- 旅す. d'Arras, Jr."/utf8>>).
+

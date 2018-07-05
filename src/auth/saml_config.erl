@@ -13,12 +13,14 @@
 -module(saml_config).
 
 -include("auth_common.hrl").
+-include("http/gui_paths.hrl").
 -include("registered_names.hrl").
 -include_lib("esaml/include/esaml.hrl").
 -include_lib("ctool/include/logging.hrl").
 
 -export([
     get_sp_config/0,
+    get_saml_cert_pem/0,
     get_supported_idps/0,
     get_idp_config/1,
     has_group_mapping_enabled/1,
@@ -41,19 +43,28 @@ get_sp_config() ->
     SAMLConfig = get_config(),
     SPConfig = maps:get(sp_config, SAMLConfig),
 
-    {ok, Hostname} = application:get_env(?APP_NAME, http_domain),
-    OzUrl = "https://" ++ Hostname,
+    RolloverNewCert = case maps:get(rollover_new_cert_file, SPConfig, undefined) of
+        undefined -> undefined;
+        CertPath -> esaml_util:load_certificate(CertPath)
+    end,
+
+    RolloverNewKey = case maps:get(rollover_new_key_file, SPConfig, undefined) of
+        undefined -> undefined;
+        KeyPath -> esaml_util:load_private_key(KeyPath)
+    end,
 
     #esaml_sp{
         entity_id = maps:get(entity_id, SPConfig),
         certificate = esaml_util:load_certificate(maps:get(cert_file, SPConfig)),
         key = esaml_util:load_private_key(maps:get(key_file, SPConfig)),
-        consume_uri = OzUrl ++ ?SAML_CONSUME_ENDPOINT,
-        metadata_uri = OzUrl ++ ?SAML_METADATA_ENDPOINT,
+        rollover_new_certificate = RolloverNewCert,
+        rollover_new_key = RolloverNewKey,
+        consume_uri = binary_to_list(oz_worker:get_uri(<<?SAML_CONSUME_PATH>>)),
+        metadata_uri = binary_to_list(oz_worker:get_uri(<<?SAML_METADATA_PATH>>)),
         org = #esaml_org{
             name = maps:get(organization_name, SPConfig),
             displayname = maps:get(organization_display_name, SPConfig),
-            url = OzUrl
+            url = binary_to_list(oz_worker:get_url())
         },
         tech = #esaml_contact{
             name = maps:get(tech_contact_name, SPConfig),
@@ -63,6 +74,23 @@ get_sp_config() ->
         sign_metadata = maps:get(sign_metadata, SPConfig),
         want_assertions_signed = maps:get(want_assertions_signed, SPConfig)
     }.
+
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Returns the SAML certificate in PEM format. If a rollover certificate is
+%% present, it is returned, otherwise the standard cert.
+%% @end
+%%--------------------------------------------------------------------
+-spec get_saml_cert_pem() -> binary().
+get_saml_cert_pem() ->
+    SAMLConfig = get_config(),
+    SPConfig = maps:get(sp_config, SAMLConfig),
+
+    Default = maps:get(cert_file, SPConfig),
+    CertificatePath = maps:get(rollover_new_cert_file, SPConfig, Default),
+    {ok, CertPem} = file:read_file(CertificatePath),
+    CertPem.
 
 
 %%--------------------------------------------------------------------
@@ -164,7 +192,7 @@ normalize_membership_specs(_, Groups) ->
 %%--------------------------------------------------------------------
 -spec get_config() -> maps:map().
 get_config() ->
-    {ok, SAMLConfigFile} = application:get_env(?APP_NAME, saml_config_file),
+    {ok, SAMLConfigFile} = oz_worker:get_env(saml_config_file),
     {ok, [SAMLConfig]} = file:consult(SAMLConfigFile),
     SAMLConfig.
 

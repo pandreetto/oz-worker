@@ -11,7 +11,7 @@
 
 {application, oz_worker, [
     {description, "OneZone worker node."},
-    {vsn, "18.02.0-beta2"},
+    {vsn, "18.02.0-rc9"},
     {registered, [oz_worker_sup]},
     {applications, [
         kernel,
@@ -26,12 +26,12 @@
         esaml,
         gui,
         erldns,
+        ctool,
         %% ctool already requires those apps below, but they are here
         %% for awareness of them being used in the project and
         %% to make sure they are started before the application.
         lager,
         hackney,
-        web_client,
         cowboy
     ]},
     {mod, {cluster_worker_app, []}},

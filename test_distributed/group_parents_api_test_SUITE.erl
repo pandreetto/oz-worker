@@ -192,11 +192,10 @@ create_parent_test(Config) ->
                 <<"type">> => ?GROUP_TYPES
             },
             bad_values = [
-                {<<"name">>, <<"">>, ?ERROR_BAD_VALUE_EMPTY(<<"name">>)},
-                {<<"name">>, 1234, ?ERROR_BAD_VALUE_BINARY(<<"name">>)},
                 {<<"type">>, kingdom,
                     ?ERROR_BAD_VALUE_NOT_ALLOWED(<<"type">>, ?GROUP_TYPES)},
                 {<<"type">>, 1234, ?ERROR_BAD_VALUE_ATOM(<<"type">>)}
+                | ?BAD_VALUES_NAME(?ERROR_BAD_VALUE_NAME)
             ]
         }
     },
@@ -211,6 +210,14 @@ join_parent_test(Config) ->
         Config, ?GROUP_JOIN_GROUP
     ),
     {ok, NonAdmin} = oz_test_utils:create_user(Config, #od_user{}),
+
+    CreateTokenForItselfFun = fun() ->
+        {ok, Macaroon} = oz_test_utils:group_invite_group_token(
+            Config, ?ROOT, Child
+        ),
+        {ok, Token} = onedata_macaroons:serialize(Macaroon),
+        Token
+    end,
 
     EnvSetUpFun = fun() ->
         {ok, Group} = oz_test_utils:create_group(Config, ?ROOT, ?GROUP_NAME2),
@@ -269,6 +276,8 @@ join_parent_test(Config) ->
             },
             bad_values = [
                 {<<"token">>, <<"">>, ?ERROR_BAD_VALUE_EMPTY(<<"token">>)},
+                {<<"token">>, CreateTokenForItselfFun,
+                    ?ERROR_CANNOT_JOIN_GROUP_TO_ITSELF},
                 {<<"token">>, 1234, ?ERROR_BAD_VALUE_TOKEN(<<"token">>)},
                 {<<"token">>, <<"123qwe">>,
                     ?ERROR_BAD_VALUE_TOKEN(<<"token">>)}

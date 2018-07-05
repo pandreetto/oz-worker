@@ -47,6 +47,7 @@
     update_test/1,
     delete_test/1,
     delete_self_test/1,
+    create_provider_registration_token_test/1,
 
     list_eff_users_test/1,
     get_eff_user_test/1,
@@ -66,9 +67,11 @@
     map_group_test/1,
     update_subdomain_test/1,
     update_domain_test/1,
+    update_domain_is_idempotent_test/1,
     get_domain_config_test/1,
     get_current_time_test/1,
-    verify_provider_identity_test/1
+    verify_provider_identity_test/1,
+    same_domain_test/1
 ]).
 
 all() ->
@@ -80,6 +83,7 @@ all() ->
         update_test,
         delete_test,
         delete_self_test,
+        create_provider_registration_token_test,
 
         list_eff_users_test,
         get_eff_user_test,
@@ -99,8 +103,10 @@ all() ->
         map_group_test,
         update_subdomain_test,
         update_domain_test,
+        update_domain_is_idempotent_test,
         get_domain_config_test,
-        get_current_time_test
+        get_current_time_test,
+        same_domain_test
     ]).
 
 %%%===================================================================
@@ -108,7 +114,7 @@ all() ->
 %%%===================================================================
 
 create_test(Config) ->
-    ExpName = ?PROVIDER_NAME1,
+    ExpName = ?CORRECT_NAME,
 
     {ok, OZDomainString} = oz_test_utils:get_oz_domain(Config),
     OZDomain = list_to_binary(OZDomainString),
@@ -195,7 +201,7 @@ create_test(Config) ->
                 <<"name">>, <<"adminEmail">>, <<"domain">>, <<"subdomainDelegation">>
             ],
             optional = [<<"latitude">>, <<"longitude">>],
-            correct_values = #{
+            correct_values = CorrectValues = #{
                 <<"name">> => [ExpName],
                 <<"domain">> => [<<"multilevel.provider-domain.org">>],
                 <<"subdomainDelegation">> => [false],
@@ -204,8 +210,6 @@ create_test(Config) ->
                 <<"longitude">> => [rand:uniform() * 180]
             },
             bad_values = [
-                {<<"name">>, <<"">>, ?ERROR_BAD_VALUE_EMPTY(<<"name">>)},
-                {<<"name">>, 1234, ?ERROR_BAD_VALUE_BINARY(<<"name">>)},
                 {<<"domain">>, <<"">>, ?ERROR_BAD_VALUE_EMPTY(<<"domain">>)},
                 {<<"domain">>, <<"https://domain.com">>, ?ERROR_BAD_VALUE_DOMAIN(<<"domain">>)},
                 {<<"domain">>, <<"domain.com:443">>, ?ERROR_BAD_VALUE_DOMAIN(<<"domain">>)},
@@ -225,16 +229,50 @@ create_test(Config) ->
                 {<<"longitude">>, -180.1, ?ERROR_BAD_VALUE_NOT_IN_RANGE(<<"longitude">>, -180, 180)},
                 {<<"longitude">>, 180.1, ?ERROR_BAD_VALUE_NOT_IN_RANGE(<<"longitude">>, -180, 180)},
                 {<<"longitude">>, 1500, ?ERROR_BAD_VALUE_NOT_IN_RANGE(<<"longitude">>, -180, 180)}
+                | ?BAD_VALUES_NAME(?ERROR_BAD_VALUE_NAME)
             ]
         }
     },
     ?assert(api_test_utils:run_tests(Config, ApiTestSpec)),
 
+    %% Create provider with provider registration policy set to strict
+    rpc:multicall(Nodes, application, set_env, [
+        ?APP_NAME, provider_registration_policy, strict
+    ]),
+    ApiTestSpec2 = #api_test_spec{
+        data_spec = #data_spec{
+            required = [
+                <<"name">>, <<"token">>, <<"adminEmail">>,
+                <<"domain">>, <<"subdomainDelegation">>
+            ],
+            optional = [<<"latitude">>, <<"longitude">>],
+            correct_values = CorrectValues#{
+                <<"token">> => [fun(_Env) ->
+                    {ok, Macaroon} = oz_test_utils:create_provider_registration_token(
+                        Config, ?ROOT
+                    ),
+                    {ok, Token} = onedata_macaroons:serialize(Macaroon),
+                    Token
+                end]
+            },
+            bad_values = [
+                {<<"token">>, <<"">>, ?ERROR_BAD_VALUE_EMPTY(<<"token">>)},
+                {<<"token">>, 1234, ?ERROR_BAD_VALUE_TOKEN(<<"token">>)},
+                {<<"token">>, <<"123qwe">>,
+                    ?ERROR_BAD_VALUE_TOKEN(<<"token">>)}
+            ]
+        }
+    },
+    ?assert(api_test_utils:run_tests(Config, ApiTestSpec2)),
+    rpc:multicall(Nodes, application, set_env, [
+        ?APP_NAME, provider_registration_policy, open
+    ]),
+
     %% Create provider with subdomain delegation turned on
     rpc:multicall(Nodes, application, set_env, [
         ?APP_NAME, subdomain_delegation_enabled, true
     ]),
-    ApiTestSpec2 = ApiTestSpec#api_test_spec{
+    ApiTestSpec3 = ApiTestSpec#api_test_spec{
         data_spec = #data_spec{
             required = [
                 <<"name">>, <<"subdomain">>, <<"ipList">>, <<"adminEmail">>,
@@ -265,12 +303,12 @@ create_test(Config) ->
             ]
         }
     },
-    ?assert(api_test_utils:run_tests(Config, ApiTestSpec2)).
+    ?assert(api_test_utils:run_tests(Config, ApiTestSpec3)).
 
 
 get_test(Config) ->
     ExpName = ?PROVIDER_NAME1,
-    ExpDomain = ?DOMAIN,
+    ExpDomain = ?UNIQUE_DOMAIN,
     ExpAdminEmail = ?ADMIN_EMAIL,
     ExpLatitude = rand:uniform() * 90,
     ExpLongitude = rand:uniform() * 180,
@@ -455,12 +493,12 @@ list_test(Config) ->
 
     % Register some providers
     {ok, {P1, P1Macaroon}} = oz_test_utils:create_provider(
-        Config, <<"P1">>
+        Config, <<"PROV1">>
     ),
-    {ok, {P2, _}} = oz_test_utils:create_provider(Config, <<"P2">>),
-    {ok, {P3, _}} = oz_test_utils:create_provider(Config, <<"P3">>),
-    {ok, {P4, _}} = oz_test_utils:create_provider(Config, <<"P4">>),
-    {ok, {P5, _}} = oz_test_utils:create_provider(Config, <<"P5">>),
+    {ok, {P2, _}} = oz_test_utils:create_provider(Config, <<"PROV2">>),
+    {ok, {P3, _}} = oz_test_utils:create_provider(Config, <<"PROV3">>),
+    {ok, {P4, _}} = oz_test_utils:create_provider(Config, <<"PROV4">>),
+    {ok, {P5, _}} = oz_test_utils:create_provider(Config, <<"PROV5">>),
     ExpProviders = [P1, P2, P3, P4, P5],
 
     % Create two users, grant one of them the privilege to list providers.
@@ -519,13 +557,13 @@ update_test(Config) ->
     AdminEmail = <<"email@domain.com">>,
     ProviderDetails = #{
         <<"name">> => Name, <<"adminEmail">> => AdminEmail,
-        <<"domain">> => ?DOMAIN, <<"subdomainDelegation">> => false,
+        <<"subdomainDelegation">> => false,
         <<"latitude">> => Latitude, <<"longitude">> => Longitude
     },
 
     EnvSetUpFun = fun() ->
         {ok, {P1, P1Macaroon}} = oz_test_utils:create_provider(
-            Config, ProviderDetails
+            Config, ProviderDetails#{<<"domain">> => ?UNIQUE_DOMAIN}
         ),
         #{providerId => P1, providerClient => {provider, P1, P1Macaroon}}
     end,
@@ -563,14 +601,12 @@ update_test(Config) ->
         data_spec = DataSpec = #data_spec{
             at_least_one = [<<"name">>, <<"adminEmail">>, <<"latitude">>, <<"longitude">>],
             correct_values = #{
-                <<"name">> => [?PROVIDER_NAME2],
+                <<"name">> => [?CORRECT_NAME],
                 <<"adminEmail">> => [<<"new+email@gmail.com">>],
                 <<"latitude">> => [rand:uniform() * 90],
                 <<"longitude">> => [rand:uniform() * 180]
             },
             bad_values = [
-                {<<"name">>, <<"">>, ?ERROR_BAD_VALUE_EMPTY(<<"name">>)},
-                {<<"name">>, 1234, ?ERROR_BAD_VALUE_BINARY(<<"name">>)},
                 {<<"adminEmail">>, 1234, ?ERROR_BAD_VALUE_BINARY(<<"adminEmail">>)},
                 {<<"adminEmail">>, <<"nodomain">>, ?ERROR_BAD_VALUE_EMAIL},
                 {<<"latitude">>, <<"ASDASD">>, ?ERROR_BAD_VALUE_FLOAT(<<"latitude">>)},
@@ -583,6 +619,7 @@ update_test(Config) ->
                 {<<"longitude">>, -180.1, ?ERROR_BAD_VALUE_NOT_IN_RANGE(<<"longitude">>, -180, 180)},
                 {<<"longitude">>, 180.1, ?ERROR_BAD_VALUE_NOT_IN_RANGE(<<"longitude">>, -180, 180)},
                 {<<"longitude">>, 1500, ?ERROR_BAD_VALUE_NOT_IN_RANGE(<<"longitude">>, -180, 180)}
+                | ?BAD_VALUES_NAME(?ERROR_BAD_VALUE_NAME)
             ]
         }
     },
@@ -670,13 +707,12 @@ delete_test(Config) ->
             function = delete,
             args = [client, providerId],
             expected_result = ?OK
+        },
+        gs_spec = #gs_spec{
+            operation = delete,
+            gri = #gri{type = od_provider, id = providerId, aspect = instance},
+            expected_result = ?OK
         }
-        % TODO VFS-3902
-%%        gs_spec = #gs_spec{
-%%            operation = delete,
-%%            gri = #gri{type = od_provider, id = providerId, aspect = instance},
-%%            expected_result = ?OK
-%%        }
     },
     ?assert(api_test_scenarios:run_scenario(delete_entity,
         [Config, ApiTestSpec, EnvSetUpFun, VerifyEndFun, DeleteEntityFun]
@@ -711,17 +747,53 @@ delete_self_test(Config) ->
             method = delete,
             path = <<"/provider">>,
             expected_code = ?HTTP_204_NO_CONTENT
+        },
+        gs_spec = #gs_spec{
+            operation = delete,
+            gri = #gri{type = od_provider, id = ?SELF, aspect = instance},
+            expected_result = ?OK
         }
-        % TODO VFS-3902
-%%        gs_spec = #gs_spec{
-%%            operation = delete,
-%%            gri = #gri{type = od_provider, id = ?SELF, aspect = instance},
-%%            expected_result = ?OK
-%%        }
     },
     ?assert(api_test_utils:run_tests(
         Config, ApiTestSpec, EnvSetUpFun, undefined, VerifyEndFun
     )).
+
+
+create_provider_registration_token_test(Config) ->
+    {ok, U1} = oz_test_utils:create_user(Config, #od_user{}),
+    oz_test_utils:user_set_oz_privileges(Config, U1, set, [?OZ_PROVIDERS_INVITE]),
+    {ok, U2} = oz_test_utils:create_user(Config, #od_user{}),
+    {ok, NonAdmin} = oz_test_utils:create_user(Config, #od_user{}),
+
+    VerifyFun = api_test_scenarios:collect_unique_tokens_fun(),
+
+    ApiTestSpec = #api_test_spec{
+        client_spec = #client_spec{
+            correct = [
+                root,
+                {user, U1}
+            ],
+            unauthorized = [nobody],
+            forbidden = [
+                {user, U2},
+                {user, NonAdmin}
+            ]
+        },
+        rest_spec = #rest_spec{
+            method = post,
+            path = <<"/providers/token">>,
+            expected_code = ?HTTP_200_OK,
+            expected_body = fun(#{<<"token">> := Token}) -> VerifyFun(Token) end
+        },
+        logic_spec = #logic_spec{
+            module = provider_logic,
+            function = create_provider_registration_token,
+            args = [client],
+            expected_result = ?OK_TERM(VerifyFun)
+        }
+        % TODO gs
+    },
+    ?assert(api_test_utils:run_tests(Config, ApiTestSpec)).
 
 
 list_eff_users_test(Config) ->
@@ -845,6 +917,7 @@ get_eff_user_test(Config) ->
                     },
                     auth_hint = ?THROUGH_PROVIDER(P1),
                     expected_result = ?OK_MAP(ExpDetails#{
+                        <<"login">> => maps:get(<<"alias">>, ExpDetails),
                         <<"gri">> => fun(EncodedGri) ->
                             #gri{id = Id} = oz_test_utils:decode_gri(
                                 Config, EncodedGri
@@ -1518,7 +1591,7 @@ check_my_ip_test(Config) ->
             method = get,
             path = <<"/provider/public/check_my_ip">>,
             expected_code = ?HTTP_200_OK,
-            expected_body = json_utils:encode_map(ClientIP)
+            expected_body = json_utils:encode(ClientIP)
         }
     },
     ?assert(api_test_utils:run_tests(Config, ApiTestSpec)).
@@ -1567,9 +1640,11 @@ update_subdomain_test(Config) ->
         Config, ?PROVIDER_NAME2
     ),
 
+    Domain = ?UNIQUE_DOMAIN,
+
     EnvSetUpFun = fun() ->
         {ok, {P1, P1Macaroon}} = oz_test_utils:create_provider(
-            Config, ?PROVIDER_NAME1
+            Config, ?PROVIDER_DETAILS(?PROVIDER_NAME1, Domain)#{<<"subdomainDelegation">> => false}
         ),
         #{providerId => P1, providerClient => {provider, P1, P1Macaroon}}
     end,
@@ -1579,7 +1654,7 @@ update_subdomain_test(Config) ->
     end,
     VerifyEndFun = fun(ShouldSucceed, #{providerId := ProviderId} = _Env, _) ->
         {ExpSubdomain, ExpDomain} = case ShouldSucceed of
-            false -> {undefined, <<"127.0.0.1">>}; % as set in create_provider
+            false -> {undefined, Domain};
             true -> {Subdomain, <<Subdomain/binary, ".", OZDomain/binary>>}
         end,
         {ok, Provider} = oz_test_utils:get_provider(Config, ProviderId),
@@ -1754,14 +1829,83 @@ update_domain_test(Config) ->
     )).
 
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Checks that the same data can be used for update twice without error
+%% (issue VFS-4615)
+%% @end
+%%--------------------------------------------------------------------
+update_domain_is_idempotent_test(Config) ->
+    Domain = ?UNIQUE_DOMAIN,
+    NewDomain = <<"newdomain.com">>,
+    ProviderDetails = #{
+        <<"name">> => ?PROVIDER_NAME1,
+        <<"adminEmail">> => <<"admin@onedata.org">>,
+        <<"domain">> => Domain,
+        <<"subdomainDelegation">> => false
+    },
+    {ok, {P1, P1Macaroon}} = oz_test_utils:create_provider(
+        Config, ProviderDetails
+    ),
+
+    EnvSetUpFun = fun() ->
+        #{providerId => P1, providerClient => {provider, P1, P1Macaroon}}
+    end,
+    VerifyEndFun = fun(true = _ShouldSucceed, #{providerId := ProviderId} = _Env, _Data) ->
+        {ok, Provider} = oz_test_utils:get_provider(Config, ProviderId),
+        ?assertEqual(NewDomain, Provider#od_provider.domain),
+        ?assertEqual(undefined, Provider#od_provider.subdomain),
+        ?assertEqual(false, Provider#od_provider.subdomain_delegation),
+        true
+    end,
+    EnvTearDownFun = fun(_Env) -> ok end,
+    ApiTestSpec = #api_test_spec{
+        client_spec = #client_spec{
+            correct = [
+                root,
+                providerClient
+            ],
+            unauthorized = [],
+            forbidden = []
+        },
+        logic_spec = #logic_spec{
+            module = provider_logic,
+            function = update_domain_config,
+            args = [client, providerId, data],
+            expected_result = ?OK
+        },
+        gs_spec = #gs_spec{
+            operation = update,
+            gri = #gri{
+                type = od_provider, id = providerId, aspect = domain_config
+            },
+            expected_result = ?OK
+        },
+        data_spec = #data_spec{
+            required = [<<"subdomainDelegation">>, <<"domain">>],
+            correct_values = #{
+                <<"subdomainDelegation">> => [false],
+                % provided twice to ensure setting same domain twice works (issue VFS-4615)
+                <<"domain">> => [NewDomain, NewDomain]
+            },
+            bad_values = []
+        }
+    },
+    ?assert(api_test_utils:run_tests(
+        Config, ApiTestSpec, EnvSetUpFun, EnvTearDownFun, VerifyEndFun
+    )).
+
+
 get_domain_config_test(Config) ->
     % Test without delegated subdomain
 
+    ExpDomain = ?UNIQUE_DOMAIN,
+
     {ok, {P1, P1Macaroon}} = oz_test_utils:create_provider(
-        Config, ?PROVIDER_NAME1
+        Config, ?PROVIDER_DETAILS(?PROVIDER_NAME1, ExpDomain)#{<<"subdomainDelegation">> => false}
     ),
     {ok, {P2, P2Macaroon}} = oz_test_utils:create_provider(
-        Config, ?PROVIDER_NAME2
+        Config, ?PROVIDER_DETAILS(?PROVIDER_NAME2, ?UNIQUE_DOMAIN)#{<<"subdomainDelegation">> => false}
     ),
 
     % Create two users, grant one of them the privilege to list providers.
@@ -1772,7 +1916,6 @@ get_domain_config_test(Config) ->
         ?OZ_PROVIDERS_LIST
     ]),
 
-    ExpDomain = <<"127.0.0.1">>, % as set in create_provider
     ExpBody = #{
         <<"subdomainDelegation">> => false,
         <<"domain">> => ExpDomain
@@ -1943,6 +2086,72 @@ verify_provider_identity_test(Config) ->
         }
     },
     ?assert(api_test_utils:run_tests(Config, ApiTestSpec)).
+
+
+same_domain_test(Config) ->
+    ProviderDetails =  ?PROVIDER_DETAILS(?PROVIDER_NAME1, ?DOMAIN)#{<<"subdomainDelegation">> => false},
+    {ok, _} = oz_test_utils:create_provider(
+        Config, ProviderDetails),
+
+    %% Fail to create provider with existing domain
+    ApiTestSpec = #api_test_spec{
+        client_spec = #client_spec{
+            correct = [root, nobody]
+        },
+        rest_spec = #rest_spec{
+            method = post,
+            path = <<"/providers">>,
+            expected_code = ?HTTP_400_BAD_REQUEST
+        },
+        logic_spec = #logic_spec{
+            operation = create,
+            module = provider_logic,
+            function = create,
+            args = [client, data],
+            expected_result = ?ERROR_REASON(?ERROR_BAD_VALUE_IDENTIFIER_OCCUPIED(<<"domain">>))
+        },
+        data_spec = #data_spec{
+            required = [
+                <<"name">>, <<"adminEmail">>, <<"domain">>, <<"subdomainDelegation">>
+            ],
+            correct_values = #{
+                <<"name">> => [?PROVIDER_NAME2],
+                <<"subdomainDelegation">> => [false],
+                <<"domain">> => [?DOMAIN],
+                <<"adminEmail">> => [?ADMIN_EMAIL]
+            }
+        }
+    },
+    ?assert(api_test_utils:run_tests(Config, ApiTestSpec)),
+
+    {ok, {P2, P2Macaroon}} = oz_test_utils:create_provider(
+        Config, ProviderDetails#{<<"name">> => ?PROVIDER_NAME2, <<"domain">> => ?UNIQUE_DOMAIN}),
+
+    %% Fail to change provider domain to existing one
+    ApiTestSpec1 = #api_test_spec{
+        client_spec = #client_spec{
+            correct = [{provider, P2, P2Macaroon}]
+        },
+        logic_spec = #logic_spec{
+            module = provider_logic,
+            function = update_domain_config,
+            args = [client, P2, data],
+            expected_result = ?ERROR_REASON(?ERROR_BAD_VALUE_IDENTIFIER_OCCUPIED(<<"domain">>))
+        },
+        gs_spec = #gs_spec{
+            operation = update,
+            gri = #gri{type = od_provider, id = P2, aspect = domain_config},
+            expected_result = ?ERROR_REASON(?ERROR_BAD_VALUE_IDENTIFIER_OCCUPIED(<<"domain">>))
+        },
+        data_spec = #data_spec{
+            required = [<<"domain">>, <<"subdomainDelegation">>],
+            correct_values = #{
+                <<"subdomainDelegation">> => [false],
+                <<"domain">> => [?DOMAIN]
+            }
+        }
+    },
+    ?assert(api_test_utils:run_tests(Config, ApiTestSpec1)).
 
 
 %%%===================================================================

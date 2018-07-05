@@ -31,7 +31,7 @@
 -define(ONEPANEL_CONNECT_OPTS, [
     {recv_timeout, 10000}, {ssl_options, [
         {secure, only_verify_peercert},
-        {cacerts, gui_listener:get_cert_chain()}
+        {cacerts, https_listener:get_cert_chain_pems()}
     ]}
 ]).
 
@@ -52,7 +52,7 @@
     get_default_provider/2
 ]).
 -export([
-    update_name/3, update_login/3, update/3,
+    update_name/3, update_alias/3, update/3,
     update_oz_privileges/4, update_oz_privileges/3,
     set_default_space/3,
     set_space_alias/4,
@@ -103,6 +103,7 @@
     has_eff_handle/2
 ]).
 -export([
+    linked_account_to_map/1,
     linked_accounts_to_maps/1,
     idp_uid_to_system_uid/2,
     onepanel_uid_to_system_uid/1,
@@ -365,18 +366,18 @@ update_name(Client, UserId, NewName) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Updates the login of given user.
+%% Updates the alias of given user.
 %% @end
 %%--------------------------------------------------------------------
--spec update_login(Client :: entity_logic:client(), UserId :: od_user:id(),
-    NewLogin :: od_user:login()) -> ok | {error, term()}.
-update_login(Client, UserId, NewLogin) ->
-    update(Client, UserId, #{<<"login">> => NewLogin}).
+-spec update_alias(Client :: entity_logic:client(), UserId :: od_user:id(),
+    NewAlias :: od_user:alias()) -> ok | {error, term()}.
+update_alias(Client, UserId, NewAlias) ->
+    update(Client, UserId, #{<<"alias">> => NewAlias}).
 
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Updates information of given user (name and login).
+%% Updates information of given user (name and alias).
 %% @end
 %%--------------------------------------------------------------------
 -spec update(Client :: entity_logic:client(), UserId :: od_user:id(),
@@ -1216,32 +1217,39 @@ has_eff_handle(#od_user{eff_handles = EffHandles}, HandleId) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Coverts linked accounts list expressed as a list of records into serializable
+%% Converts a linked account into serializable map.
+%% @end
+%%--------------------------------------------------------------------
+-spec linked_account_to_map(#linked_account{}) ->
+    maps:map().
+linked_account_to_map(LinkedAccount) ->
+    #linked_account{
+        idp = IdentityProvider,
+        subject_id = SubjectId,
+        login = Login,
+        name = Name,
+        email_list = EmailList,
+        groups = Groups
+    } = LinkedAccount,
+    #{
+        <<"idp">> => IdentityProvider,
+        <<"subjectId">> => SubjectId,
+        <<"login">> => Login,
+        <<"name">> => Name,
+        <<"emailList">> => EmailList,
+        <<"groups">> => Groups
+    }.
+
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Converts linked accounts list expressed as a list of records into serializable
 %% list of maps.
 %% @end
 %%--------------------------------------------------------------------
--spec linked_accounts_to_maps(LinkedAccounts :: [#linked_account{}]) ->
-    [maps:map()].
+-spec linked_accounts_to_maps([#linked_account{}]) -> [maps:map()].
 linked_accounts_to_maps(LinkedAccounts) ->
-    lists:map(
-        fun(OAuthAccount) ->
-            #linked_account{
-                idp = IdentityProvider,
-                subject_id = UserId,
-                login = Login,
-                name = Name,
-                email_list = EmailList,
-                groups = Groups
-            } = OAuthAccount,
-            #{
-                <<"idp">> => IdentityProvider,
-                <<"subjectId">> => UserId,
-                <<"login">> => Login,
-                <<"name">> => Name,
-                <<"emailList">> => EmailList,
-                <<"groups">> => Groups
-            }
-        end, LinkedAccounts).
+    [linked_account_to_map(Acc) || Acc <- LinkedAccounts].
 
 
 %%--------------------------------------------------------------------
@@ -1271,13 +1279,12 @@ onepanel_uid_to_system_uid(OnepanelUserId) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec create_user_by_linked_account(#linked_account{}) ->
-    {ok, UserId :: od_user:id()} | {error, not_found}.
+    {ok, od_user:doc()} | {error, not_found}.
 create_user_by_linked_account(LinkedAccount) ->
     #linked_account{idp = IdPName, subject_id = IdPUserId} = LinkedAccount,
     UserId = idp_uid_to_system_uid(IdPName, IdPUserId),
     {ok, UserId} = create(#od_user{}, UserId),
-    merge_linked_account(UserId, LinkedAccount),
-    {ok, UserId}.
+    merge_linked_account(UserId, LinkedAccount).
 
 
 %%--------------------------------------------------------------------
@@ -1287,7 +1294,7 @@ create_user_by_linked_account(LinkedAccount) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec merge_linked_account(UserId :: od_user:id(),
-    LinkedAccount :: #linked_account{}) -> ok.
+    LinkedAccount :: #linked_account{}) -> {ok, od_user:doc()}.
 merge_linked_account(UserId, LinkedAccount) ->
     % The update cannot be done in one transaction, because linked account
     % merging causes adding/removing the user from groups, which modifies user
@@ -1308,7 +1315,7 @@ merge_linked_account(UserId, LinkedAccount) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec merge_linked_account_unsafe(UserId :: od_user:id(),
-    LinkedAccount :: #linked_account{}) -> ok.
+    LinkedAccount :: #linked_account{}) -> {ok, od_user:doc()}.
 merge_linked_account_unsafe(UserId, LinkedAccount) ->
     {ok, #document{value = #od_user{
         name = Name, email_list = Emails, linked_accounts = LinkedAccounts
@@ -1335,14 +1342,13 @@ merge_linked_account_unsafe(UserId, LinkedAccount) ->
     % Coalesce user groups
     idp_group_mapping:coalesce_groups(IdP, UserId, OldGroups, NewGroups),
     % Return updated user info
-    {ok, _} = od_user:update(UserId, fun(User = #od_user{}) ->
+    od_user:update(UserId, fun(User = #od_user{}) ->
         {ok, User#od_user{
             name = NewName,
             email_list = NewEmails,
             linked_accounts = NewLinkedAccs
         }}
-    end),
-    ok.
+    end).
 
 
 %%--------------------------------------------------------------------
@@ -1378,7 +1384,7 @@ is_email_occupied(UserId, Email) ->
 %%--------------------------------------------------------------------
 -spec authenticate_by_basic_credentials(Login :: binary(),
     Password :: binary()) ->
-    {ok, UserDoc :: #document{}, FirstLogin :: boolean()} | {error, term()}.
+    {ok, UserDoc :: #document{}} | {error, term()}.
 authenticate_by_basic_credentials(Login, Password) ->
     case get_or_fetch_user_info(Login, Password) of
         {error, Reason} ->
@@ -1387,29 +1393,20 @@ authenticate_by_basic_credentials(Login, Password) ->
             OnepanelUserId = maps:get(<<"userId">>, Props),
             UserId = onepanel_uid_to_system_uid(OnepanelUserId),
             UserRole = maps:get(<<"userRole">>, Props),
-            {UserDocument, FirstLogin} = case od_user:get(UserId) of
+            UserDocument = case od_user:get(UserId) of
                 {error, not_found} ->
                     UserRecord = #od_user{
                         name = Login,
-                        login = Login,
+                        alias = Login,
                         basic_auth_enabled = true
                     },
                     {ok, UserId} = create(UserRecord, UserId),
                     ?info("Created new account for user '~s' from onepanel "
                     "(role: '~s'), id: '~s'", [Login, UserRole, UserId]),
                     {ok, UserDoc} = od_user:get(UserId),
-                    {UserDoc, true};
-                {ok, #document{value = #od_user{} = UserInfo} = UserDoc} ->
-                    % Make sure user login is up to date (it might have changed
-                    % in onepanel since last login). Also enable basic auth for
-                    % him.
-                    NewDoc = UserDoc#document{
-                        value = UserInfo#od_user{
-                            login = Login,
-                            basic_auth_enabled = true
-                        }},
-                    {ok, _} = od_user:save(NewDoc),
-                    {NewDoc, false}
+                    UserDoc;
+                {ok, Doc} ->
+                    Doc
             end,
             % Check if user's role entitles him to belong to any groups
             {ok, GroupMapping} = application:get_env(
@@ -1429,7 +1426,7 @@ authenticate_by_basic_credentials(Login, Password) ->
                             ok
                     end
                 end, Groups),
-            {ok, UserDocument, FirstLogin}
+            {ok, UserDocument}
     end.
 
 
@@ -1450,19 +1447,21 @@ change_user_password(Login, OldPassword, NewPassword) ->
         <<"content-type">> => <<"application/json">>
     },
     URL = get_onepanel_rest_user_url(Login),
-    Body = json_utils:encode_map(#{
+    Body = json_utils:encode(#{
         <<"currentPassword">> => OldPassword,
         <<"newPassword">> => NewPassword
     }),
     case http_client:patch(URL, Headers, Body, ?ONEPANEL_CONNECT_OPTS) of
         {ok, 204, _, _} ->
+            % Invalidate basic auth cache
+            basic_auth_cache:delete(Login),
             ok;
         {ok, 401, _, _} ->
             {error, <<"Invalid password">>};
         {ok, _, _, ErrorJSON} when size(ErrorJSON) > 0 ->
             try
-                ErrorProps = json_utils:decode(ErrorJSON),
-                Message = proplists:get_value(<<"description">>, ErrorProps,
+                ErrorMap = json_utils:decode(ErrorJSON),
+                Message = maps:get(<<"description">>, ErrorMap,
                     <<"Cannot change password">>),
                 {error, Message}
             catch _:_ ->
@@ -1521,9 +1520,9 @@ basic_auth_header(Login, Password) ->
 -spec get_onepanel_rest_user_url(Login :: binary()) -> URL :: binary().
 get_onepanel_rest_user_url(Login) ->
     {ok, OnepanelRESTURL} =
-        application:get_env(?APP_NAME, onepanel_rest_url),
+        oz_worker:get_env(onepanel_rest_url),
     {ok, OnepanelGetUsersEndpoint} =
-        application:get_env(?APP_NAME, onepanel_users_endpoint),
+        oz_worker:get_env(onepanel_users_endpoint),
     <<(str_utils:to_binary(OnepanelRESTURL))/binary,
         (str_utils:to_binary(OnepanelGetUsersEndpoint))/binary, Login/binary>>.
 
@@ -1541,16 +1540,16 @@ fetch_user_info(Login, Password) ->
     URL = get_onepanel_rest_user_url(Login),
     case http_client:get(URL, Headers, <<"">>, ?ONEPANEL_CONNECT_OPTS) of
         {ok, 200, _, JSON} ->
-            UserInfo = json_utils:decode_map(JSON),
+            UserInfo = json_utils:decode(JSON),
             basic_auth_cache:save(Login, Password, UserInfo),
             UserInfo;
         {ok, 401, _, _} ->
             {error, <<"Invalid login or password">>};
         {ok, _, _, ErrorJSON} when size(ErrorJSON) > 0 ->
             try
-                ErrorProps = json_utils:decode(ErrorJSON),
-                Message = proplists:get_value(<<"description">>, ErrorProps,
-                <<"Invalid login or password">>),
+                ErrorMap = json_utils:decode(ErrorJSON),
+                Message = maps:get(<<"description">>, ErrorMap,
+                    <<"Invalid login or password">>),
                 {error, Message}
             catch _:_ ->
                 {error, bad_request}
@@ -1588,7 +1587,7 @@ get_or_fetch_user_info(Login, Password) ->
 setup_user(UserId, UserInfo) ->
     % Check if automatic first space is enabled, if so create a space
     % for the user.
-    case application:get_env(?APP_NAME, enable_automatic_first_space) of
+    case oz_worker:get_env(enable_automatic_first_space) of
         {ok, true} ->
             SpaceName = case UserInfo#od_user.name of
                 <<"">> ->
@@ -1605,9 +1604,9 @@ setup_user(UserId, UserInfo) ->
     end,
 
     % Check if global groups are enabled, if so add the user to the groups.
-    case application:get_env(?APP_NAME, enable_global_groups) of
+    case oz_worker:get_env(enable_global_groups) of
         {ok, true} ->
-            {ok, GlobalGroups} = application:get_env(?APP_NAME, global_groups),
+            {ok, GlobalGroups} = oz_worker:get_env(global_groups),
             lists:foreach(
                 fun({GroupId, Privileges}) ->
                     {ok, UserId} = group_logic:add_user(

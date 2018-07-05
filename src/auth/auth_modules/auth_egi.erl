@@ -18,7 +18,7 @@
 -include("datastore/oz_datastore_models.hrl").
 
 %% API
--export([get_redirect_url/2, validate_login/1, get_user_info/2]).
+-export([get_redirect_url/2, validate_login/2, get_user_info/2]).
 -export([normalized_membership_specs/2, normalized_membership_spec/2]).
 
 %%%===================================================================
@@ -31,8 +31,8 @@
 %% @end
 %%--------------------------------------------------------------------
 -spec get_redirect_url(auth_utils:idp(), boolean()) -> {ok, binary()} | {error, term()}.
-get_redirect_url(IdP, ConnectAccount) ->
-    auth_oauth2_common:get_redirect_url(ConnectAccount, IdP).
+get_redirect_url(IdP, LinkAccount) ->
+    auth_oauth2_common:get_redirect_url(LinkAccount, IdP).
 
 
 %%--------------------------------------------------------------------
@@ -40,11 +40,11 @@ get_redirect_url(IdP, ConnectAccount) ->
 %% See function specification in auth_module_behaviour.
 %% @end
 %%--------------------------------------------------------------------
--spec validate_login(auth_utils:idp()) ->
+-spec validate_login(auth_utils:idp(), QueryParams :: proplists:proplist()) ->
     {ok, #linked_account{}} | {error, term()}.
-validate_login(IdP) ->
+validate_login(IdP, QueryParams) ->
     auth_oauth2_common:validate_login(
-        IdP, secret_over_http_basic, access_token_in_url
+        IdP, QueryParams, secret_over_http_basic, access_token_in_url
     ).
 
 
@@ -60,42 +60,68 @@ get_user_info(IdP, AccessToken) ->
         IdP, access_token_in_url, AccessToken
     ).
 
+
 %%--------------------------------------------------------------------
 %% @doc
-%% Returns a string that represent user's group membership for given
-%% IdP.
+%% Returns a string that represent user's group membership for EGI.
+%%
+%% Group format:
+%%      urn:mace:egi.eu:group:<VO>[[:<GROUP>][:<SUBGROUP>*]][:role=<ROLE>]#<GROUP-AUTHORITY>
+%% where:
+%%      <VO> is the name of the Virtual Organisation
+%%      <GROUP> is the name of a group in the identified <VO>;
+%%          specifying a group is optional
+%%      zero or more <SUBGROUP> components represent the hierarchy of subgroups
+%%          in the <GROUP>; specifying sub-groups is optional
+%%      the optional <ROLE> component is scoped to the rightmost (sub)group;
+%%          if no group information is specified, the role applies to the VO
+%%      <GROUP-AUTHORITY> is a non-empty string that indicates the authoritative
+%%          source for the entitlement value. For example, it can be the FQDN of
+%%          the group management system that is responsible for the identified
+%%          group membership information
 %% @end
 %%--------------------------------------------------------------------
 -spec normalized_membership_spec(auth_utils:idp(), binary()) ->
     idp_group_mapping:membership_spec().
-normalized_membership_spec(_, <<"urn:mace:egi.eu:", Group/binary>>) ->
+normalized_membership_spec(_, <<"urn:mace:egi.eu:group:", Group/binary>>) ->
     % Strip out the prefix standard for EGI
 
-    [GroupStructureEncoded, Vo] = binary:split(Group, <<"@">>),
-    % EGI can provide groups from multiple VOs
-    VoId = case Vo of
-        <<"vo.elixir-europe.org">> ->
-            % Unified id with groups from ELIXIR SAML
-            <<"elixir">>;
-        _ ->
-            % Use the same names as in EGI for other VO's
-            Vo
-    end,
+    [GroupStructureEncoded, _GroupAuthority] = binary:split(Group, <<"#">>),
     % Replace plus sings with spaces
     GroupStructure = binary:replace(GroupStructureEncoded, <<"+">>, <<" ">>, [global]),
-    GroupTokensAll = binary:split(GroupStructure, <<":">>, [global]),
-    GroupTokens = lists:sublist(GroupTokensAll, length(GroupTokensAll) - 1),
-    MemberSpec = case lists:last(GroupTokensAll) of
+    GroupTokens = binary:split(GroupStructure, <<":">>, [global, trim_all]),
+
+    {VoId, GroupTokensWithoutVo} = case vo_id() of
+        undefined ->
+            [First | Rest] = GroupTokens,
+            {First, Rest};
+        Vo ->
+            {Vo, GroupTokens}
+    end,
+
+    {Groups, RoleStr} = case GroupTokensWithoutVo of
+        [] ->
+            {[], undefined};
+        _ ->
+            case lists:last(GroupTokensWithoutVo) of
+                <<"role=", Role/binary>> ->
+                    {lists:sublist(GroupTokensWithoutVo, length(GroupTokensWithoutVo) - 1), Role};
+                _ ->
+                    {GroupTokensWithoutVo, undefined}
+            end
+    end,
+
+    MemberSpec = case RoleStr of
         <<"member">> -> <<"user:member">>;
         <<"manager">> -> <<"user:manager">>;
         <<"admin">> -> <<"user:admin">>;
         <<"chair">> -> <<"user:admin">>;
         _ -> <<"user:member">>
     end,
-    MappedTokens = [<<"tm:", T/binary>> || T <- GroupTokens],
-    MappedTokensWithMemberSpec = MappedTokens ++ [MemberSpec],
-    SpecWithoutVo = str_utils:join_binary(MappedTokensWithMemberSpec, <<"/">>),
-    <<"vo:", VoId/binary, "/", SpecWithoutVo/binary>>.
+    MappedTokens = [<<"tm:", T/binary>> || T <- Groups],
+    FullSpecTokens = [<<"vo:", VoId/binary>>] ++ MappedTokens ++ [MemberSpec],
+    str_utils:join_binary(FullSpecTokens, <<"/">>).
+
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -107,8 +133,32 @@ normalized_membership_spec(_, <<"urn:mace:egi.eu:", Group/binary>>) ->
 %% be mapped to the same specs.
 %% @end
 %%--------------------------------------------------------------------
--spec normalized_membership_specs(auth_utils:idp(), proplists:proplist()) ->
+-spec normalized_membership_specs(auth_utils:idp(), maps:map()) ->
     [idp_group_mapping:membership_spec()].
-normalized_membership_specs(_, Props) ->
-    Groups = proplists:get_value(<<"edu_person_entitlements">>, Props, []),
-    lists:map(fun(Group) -> normalized_membership_spec(egi, Group) end, Groups).
+normalized_membership_specs(_, Map) ->
+    Groups = maps:get(<<"edu_person_entitlements">>, Map, []),
+    lists:usort(lists:flatmap(fun(Group) ->
+        try
+            [normalized_membership_spec(egi, Group)]
+        catch _:_ ->
+            []
+        end
+    end, Groups)).
+
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Returns the group Id for EGI DataHub VO. If 'undefined' value is specified in
+%% config, there will be no common VO group (rather than that top EGI groups
+%% will be treated as different VOs).
+%% @end
+%%--------------------------------------------------------------------
+-spec vo_id() -> undefined | binary().
+vo_id() ->
+    GroupMappingConfig = auth_config:get_group_mapping_config(egi),
+    proplists:get_value(vo_group_id, GroupMappingConfig).

@@ -21,6 +21,7 @@
 -define(PLUGIN, provider_logic_plugin).
 
 -export([
+    create_provider_registration_token/1,
     create/4, create/6, create/2, create_dev/2
 ]).
 -export([
@@ -46,6 +47,7 @@
     update_domain_config/3,
     get_domain_config/2,
     set_dns_txt_record/4,
+    set_dns_txt_record/5,
     remove_dns_txt_record/3
 ]).
 -export([
@@ -235,6 +237,22 @@ delete(Client, ProviderId) ->
 
 %%--------------------------------------------------------------------
 %% @doc
+%% Creates a provider registration token,
+%% which can be used by any provider to join Onezone.
+%% @end
+%%--------------------------------------------------------------------
+-spec create_provider_registration_token(Client :: entity_logic:client()) ->
+    {ok, macaroon:macaroon()} | {error, term()}.
+create_provider_registration_token(Client) ->
+    ?CREATE_RETURN_DATA(entity_logic:handle(#el_req{
+        operation = create,
+        client = Client,
+        gri = #gri{type = od_provider, aspect = provider_registration_token}
+    })).
+
+
+%%--------------------------------------------------------------------
+%% @doc
 %% Supports a space based on support_space_token and support size.
 %% @end
 %%--------------------------------------------------------------------
@@ -280,18 +298,30 @@ update_domain_config(Client, ProviderId, Data) ->
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Sets txt record for provider's subdomain
+%% Sets txt record for provider's subdomain with default TTL.
 %% @end
 %%--------------------------------------------------------------------
 -spec set_dns_txt_record(Client :: entity_logic:client(),
     ProviderId :: od_provider:id(), Name :: binary(), Content :: binary()) ->
     ok | {error, term()}.
 set_dns_txt_record(Client, ProviderId, Name, Content) ->
+    set_dns_txt_record(Client, ProviderId, Name, Content, undefined).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Sets txt record for provider's subdomain with given TTL.
+%% @end
+%%--------------------------------------------------------------------
+-spec set_dns_txt_record(Client :: entity_logic:client(),
+    ProviderId :: od_provider:id(), Name :: binary(), Content :: binary(),
+    TTL :: dns_state:ttl()) ->
+    ok | {error, term()}.
+set_dns_txt_record(Client, ProviderId, Name, Content, TTL) ->
     entity_logic:handle(#el_req{
         operation = create,
         client = Client,
         gri = #gri{type = od_provider, id = ProviderId, aspect = {dns_txt_record, Name}},
-        data = #{<<"content">> => Content}
+        data = #{<<"content">> => Content, <<"ttl">> => TTL}
     }).
 
 %%--------------------------------------------------------------------
@@ -624,7 +654,7 @@ choose_provider_for_user(UserId) ->
     case DSProviders of
         List when length(List) > 0 ->
             % Default space has got some providers, random one
-            {ok, lists:nth(crypto:rand_uniform(1, length(DSProviders) + 1), DSProviders)};
+            {ok, lists:nth(rand:uniform(length(DSProviders)), DSProviders)};
         _ ->
             % Default space does not have a provider, look in other spaces
             ProviderIds = lists:foldl(
@@ -639,7 +669,7 @@ choose_provider_for_user(UserId) ->
                     {error, no_provider};
                 _ ->
                     % There are some providers for other spaces, random one
-                    {ok, lists:nth(crypto:rand_uniform(1, length(ProviderIds) + 1), ProviderIds)}
+                    {ok, lists:nth(rand:uniform(length(ProviderIds)), ProviderIds)}
             end
     end.
 

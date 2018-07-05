@@ -56,6 +56,7 @@ fetch_entity(ProviderId) ->
 %%--------------------------------------------------------------------
 -spec operation_supported(entity_logic:operation(), entity_logic:aspect(),
     entity_logic:scope()) -> boolean().
+operation_supported(create, provider_registration_token, private) -> true;
 operation_supported(create, instance, private) -> true;
 operation_supported(create, instance_dev, private) -> true;
 operation_supported(create, support, private) -> true;
@@ -72,6 +73,7 @@ operation_supported(get, instance, protected) -> true;
 operation_supported(get, eff_users, private) -> true;
 operation_supported(get, eff_groups, private) -> true;
 operation_supported(get, spaces, private) -> true;
+operation_supported(get, user_spaces, private) -> true;
 operation_supported(get, domain_config, private) -> true;
 operation_supported(get, {check_my_ip, _}, private) -> true;
 operation_supported(get, current_time, private) -> true;
@@ -101,6 +103,17 @@ create(Req = #el_req{gri = #gri{id = undefined, aspect = instance} = GRI}) ->
     SubdomainDelegation = maps:get(<<"subdomainDelegation">>, Data),
     AdminEmail = maps:get(<<"adminEmail">>, Data),
 
+    ProviderRegistrationPolicy = application:get_env(
+        ?APP_NAME, provider_registration_policy, open
+    ),
+    case ProviderRegistrationPolicy of
+        open ->
+            ok;
+        restricted ->
+            Token = maps:get(<<"token">>, Data),
+            {ok, {od_provider, undefined}} = token_logic:consume(Token)
+    end,
+
     ProviderId = datastore_utils:gen_key(),
     {ok, {Macaroon, Identity}} = macaroon_logic:create_provider_root_macaroon(ProviderId),
 
@@ -118,21 +131,32 @@ create(Req = #el_req{gri = #gri{id = undefined, aspect = instance} = GRI}) ->
             end
     end,
 
-    Provider = #od_provider{
-        name = Name, root_macaroon = Identity,
-        subdomain_delegation = SubdomainDelegation,
-        domain = Domain, subdomain = Subdomain,
-        latitude = Latitude, longitude = Longitude,
-        admin_email = AdminEmail
-    },
+    % ensure no race condition inbetween domain conflict check and provider creation
+    critical_section:run({domain_config, Domain}, fun() ->
+        case is_domain_occupied(Domain) of
+            {true, OtherProviderId} ->
+                dns_state:remove_delegation_config(ProviderId),
+                ?debug("Refusing to register provider with domain ~s as it is used by provider ~s",
+                    [Domain, OtherProviderId]),
+                ?ERROR_BAD_VALUE_IDENTIFIER_OCCUPIED(<<"domain">>);
+            false ->
+                Provider = #od_provider{
+                    name = Name, root_macaroon = Identity,
+                    subdomain_delegation = SubdomainDelegation,
+                    domain = Domain, subdomain = Subdomain,
+                    latitude = Latitude, longitude = Longitude,
+                    admin_email = AdminEmail
+                },
 
-    case od_provider:create(#document{key = ProviderId, value = Provider}) of
-        {ok, _} -> ok;
-        _Error ->
-            dns_state:remove_delegation_config(ProviderId),
-            throw(?ERROR_INTERNAL_SERVER_ERROR)
-    end,
-    {ok, {fetched, GRI#gri{id = ProviderId}, {Provider, Macaroon}}};
+                case od_provider:create(#document{key = ProviderId, value = Provider}) of
+                    {ok, _} -> {ok, {fetched, GRI#gri{id = ProviderId}, {Provider, Macaroon}}};
+                    _Error ->
+                        dns_state:remove_delegation_config(ProviderId),
+                        ?ERROR_INTERNAL_SERVER_ERROR
+                end
+        end
+    end);
+
 
 create(Req = #el_req{gri = #gri{id = undefined, aspect = instance_dev} = GRI}) ->
     Data = Req#el_req.data,
@@ -142,6 +166,17 @@ create(Req = #el_req{gri = #gri{id = undefined, aspect = instance_dev} = GRI}) -
     SubdomainDelegation = maps:get(<<"subdomainDelegation">>, Data),
     UUID = maps:get(<<"uuid">>, Data, undefined),
     AdminEmail = maps:get(<<"adminEmail">>, Data),
+
+    ProviderRegistrationPolicy = application:get_env(
+        ?APP_NAME, provider_registration_policy, open
+    ),
+    case ProviderRegistrationPolicy of
+        open ->
+            ok;
+        restricted ->
+            Token = maps:get(<<"token">>, Data),
+            {ok, {od_provider, undefined}} = token_logic:consume(Token)
+    end,
 
     ProviderId = UUID,
     {ok, {Macaroon, Identity}} = macaroon_logic:create_provider_root_macaroon(ProviderId),
@@ -160,21 +195,40 @@ create(Req = #el_req{gri = #gri{id = undefined, aspect = instance_dev} = GRI}) -
             end
     end,
 
-    Provider = #od_provider{
-        name = Name, root_macaroon = Identity,
-        subdomain_delegation = SubdomainDelegation,
-        domain = Domain, subdomain = Subdomain,
-        latitude = Latitude, longitude = Longitude,
-        admin_email = AdminEmail
-    },
+    % ensure no race condition inbetween domain conflict check and provider creation
+    critical_section:run({domain_config, Domain}, fun() ->
+        case is_domain_occupied(Domain) of
+            {true, OtherProviderId} ->
+                dns_state:remove_delegation_config(ProviderId),
+                ?debug("Refusing to register provider with domain ~s as it is used by provider ~s",
+                    [Domain, OtherProviderId]),
+                ?ERROR_BAD_VALUE_IDENTIFIER_OCCUPIED(<<"domain">>);
+            false ->
+                Provider = #od_provider{
+                    name = Name, root_macaroon = Identity,
+                    subdomain_delegation = SubdomainDelegation,
+                    domain = Domain, subdomain = Subdomain,
+                    latitude = Latitude, longitude = Longitude,
+                    admin_email = AdminEmail
+                },
 
-    case od_provider:create(#document{key = ProviderId, value = Provider}) of
-        {ok, _} -> ok;
-        _Error ->
-            dns_state:remove_delegation_config(ProviderId),
-            throw(?ERROR_INTERNAL_SERVER_ERROR)
-    end,
-    {ok, {fetched, GRI#gri{id = ProviderId}, {Provider, Macaroon}}};
+                case od_provider:create(#document{key = ProviderId, value = Provider}) of
+                    {ok, _} -> {ok, {fetched, GRI#gri{id = ProviderId}, {Provider, Macaroon}}};
+                    _Error ->
+                        dns_state:remove_delegation_config(ProviderId),
+                        ?ERROR_INTERNAL_SERVER_ERROR
+                end
+        end
+    end);
+
+
+create(Req = #el_req{gri = #gri{id = undefined, aspect = provider_registration_token}}) ->
+    {ok, Macaroon} = token_logic:create(
+        Req#el_req.client,
+        ?PROVIDER_REGISTRATION_TOKEN,
+        {od_provider, undefined}
+    ),
+    {ok, {data, Macaroon}};
 
 create(#el_req{gri = #gri{id = ProviderId, aspect = support}, data = Data}) ->
     SupportSize = maps:get(<<"size">>, Data),
@@ -197,7 +251,8 @@ create(#el_req{gri = #gri{id = ProviderId, aspect = {dns_txt_record, RecordName}
     case fetch_entity(ProviderId) of
         {ok, #od_provider{subdomain_delegation = true}} ->
             #{<<"content">> := Content} = Data,
-            ok = dns_state:set_txt_record(ProviderId, RecordName, Content);
+            TTL = maps:get(<<"ttl">>, Data, undefined),
+            ok = dns_state:set_txt_record(ProviderId, RecordName, Content, TTL);
         {ok, #od_provider{subdomain_delegation = false}} ->
             ?ERROR_SUBDOMAIN_DELEGATION_DISABLED;
         Error -> Error
@@ -274,6 +329,14 @@ get(#el_req{gri = #gri{aspect = eff_groups}}, Provider) ->
 get(#el_req{gri = #gri{aspect = spaces}}, Provider) ->
     {ok, maps:keys(Provider#od_provider.spaces)};
 
+get(#el_req{client = ?USER(UserId), gri = #gri{aspect = user_spaces}}, Provider) ->
+    AllSpaces = maps:keys(Provider#od_provider.spaces),
+    {ok, UserSpaces} = user_logic:get_eff_spaces(?ROOT, UserId),
+    {ok, ordsets:intersection(
+        ordsets:from_list(AllSpaces),
+        ordsets:from_list(UserSpaces)
+    )};
+
 get(#el_req{gri = #gri{aspect = {check_my_ip, ClientIP}}}, _) ->
     {ok, ClientIP};
 
@@ -303,39 +366,11 @@ update(#el_req{gri = #gri{id = ProviderId, aspect = instance}, data = Data}) ->
     ok;
 
 update(#el_req{gri = #gri{id = ProviderId, aspect = domain_config}, data = Data}) ->
-    % prevent race condition with simultanous updates
+    % prevent race condition with simultaneous updates
     critical_section:run({domain_config_update, ProviderId}, fun() ->
-        Result = case maps:get(<<"subdomainDelegation">>, Data) of
-            false ->
-                dns_state:remove_delegation_config(ProviderId),
-                Domain = maps:get(<<"domain">>, Data),
-                od_provider:update(ProviderId, fun(Provider) ->
-                    {ok, Provider#od_provider{
-                        subdomain_delegation = false,
-                        domain = Domain,
-                        subdomain = undefined
-                    }}
-                end);
-            true ->
-                Subdomain = maps:get(<<"subdomain">>, Data),
-                FQDN = dns_config:build_fqdn_from_subdomain(Subdomain),
-                IPs = maps:get(<<"ipList">>, Data),
-                case dns_state:set_delegation_config(ProviderId, Subdomain, IPs) of
-                    ok ->
-                        od_provider:update(ProviderId, fun(Provider) ->
-                            {ok, Provider#od_provider{
-                                subdomain_delegation = true,
-                                domain = FQDN,
-                                subdomain = Subdomain
-                            }}
-                        end);
-                    {error, subdomain_exists} ->
-                        ?ERROR_BAD_VALUE_IDENTIFIER_OCCUPIED(<<"subdomain">>)
-                end
-        end,
-        case Result of
-            {ok, _} -> ok;
-            Error -> Error
+        case maps:get(<<"subdomainDelegation">>, Data) of
+            true -> update_provider_subomain(ProviderId, Data);
+            false -> update_provider_domain(ProviderId, Data)
         end
     end);
 
@@ -359,7 +394,13 @@ delete(#el_req{gri = #gri{id = ProviderId, aspect = instance}}) ->
     entity_graph:delete_with_relations(od_provider, ProviderId),
     % Force disconnect the provider (if connected)
     case provider_connection:get_connection_ref(ProviderId) of
-        {ok, ConnRef} -> gs_server:terminate_connection(ConnRef);
+        {ok, ConnRef} ->
+            spawn(fun() ->
+                % Make sure client receives message of successful deletion before connection termination
+                timer:sleep(5000),
+                gs_server:terminate_connection(ConnRef)
+            end),
+            ok;
         _ -> ok
     end;
 
@@ -394,6 +435,12 @@ exists(Req = #el_req{gri = #gri{aspect = instance, scope = protected}}, Provider
 exists(#el_req{gri = #gri{aspect = {space, SpaceId}}}, Provider) ->
     maps:is_key(SpaceId, Provider#od_provider.spaces);
 
+exists(#el_req{client = Client, gri = #gri{aspect = user_spaces}}, _) ->
+    case Client of
+        ?USER -> true;
+        _ -> false
+    end;
+
 % All other aspects exist if provider record exists.
 exists(#el_req{gri = #gri{id = Id}}, #od_provider{}) ->
     Id =/= undefined.
@@ -417,6 +464,9 @@ authorize(#el_req{operation = create, gri = #gri{aspect = verify_provider_identi
 
 authorize(#el_req{operation = create, gri = #gri{aspect = instance}}, _) ->
     true;
+
+authorize(Req = #el_req{operation = create, gri = #gri{aspect = provider_registration_token}}, _) ->
+    user_logic_plugin:auth_by_oz_privilege(Req, ?OZ_PROVIDERS_INVITE);
 
 authorize(#el_req{operation = create, gri = #gri{aspect = instance_dev}}, _) ->
     true;
@@ -486,6 +536,12 @@ authorize(Req = #el_req{operation = get, gri = #gri{aspect = spaces}}, _) ->
     auth_by_self(Req) orelse
         user_logic_plugin:auth_by_oz_privilege(Req, ?OZ_PROVIDERS_LIST_SPACES);
 
+authorize(#el_req{client = Client, operation = get, gri = #gri{aspect = user_spaces}}, _) ->
+    case Client of
+        ?USER -> true;
+        _ -> false
+    end;
+
 authorize(Req = #el_req{operation = get, gri = #gri{aspect = domain_config}}, _) ->
     auth_by_self(Req);
 
@@ -525,14 +581,24 @@ authorize(_, _) ->
 validate(#el_req{operation = create, gri = #gri{aspect = instance},
     data = Data}
 ) ->
-    {ok, SubdomainDelegationEnabled} = application:get_env(
-        ?APP_NAME, subdomain_delegation_enabled
+    SubdomainDelegationEnabled = application:get_env(
+        ?APP_NAME, subdomain_delegation_enabled, true
     ),
-    Required = #{
-        <<"name">> => {binary, non_empty},
+    ProviderRegistrationPolicy = application:get_env(
+        ?APP_NAME, provider_registration_policy, open
+    ),
+
+    AlwaysRequired = #{
+        <<"name">> => {binary, name},
         <<"subdomainDelegation">> => {boolean, any},
         <<"adminEmail">> => {binary, email}
     },
+    Required = case ProviderRegistrationPolicy of
+        open ->
+            AlwaysRequired;
+        restricted ->
+            AlwaysRequired#{<<"token">> => {token, ?PROVIDER_REGISTRATION_TOKEN}}
+    end,
     Common = #{
         optional => #{
             <<"latitude">> => {float, {between, -90, 90}},
@@ -563,15 +629,25 @@ validate(#el_req{operation = create, gri = #gri{aspect = instance},
 validate(#el_req{operation = create, gri = #gri{aspect = instance_dev},
     data = Data}
 ) ->
-    {ok, SubdomainDelegationEnabled} = application:get_env(
-        ?APP_NAME, subdomain_delegation_enabled
+    SubdomainDelegationEnabled = application:get_env(
+        ?APP_NAME, subdomain_delegation_enabled, true
     ),
-    Required = #{
+    ProviderRegistrationPolicy = application:get_env(
+        ?APP_NAME, provider_registration_policy, open
+    ),
+
+    AlwaysRequired = #{
         <<"name">> => {binary, non_empty},
         <<"uuid">> => {binary, non_empty},
         <<"subdomainDelegation">> => {boolean, any},
         <<"adminEmail">> => {binary, email}
     },
+    Required = case ProviderRegistrationPolicy of
+        open ->
+            AlwaysRequired;
+        restricted ->
+            AlwaysRequired#{<<"token">> => {token, ?PROVIDER_REGISTRATION_TOKEN}}
+    end,
     Common = #{
         optional => #{
             <<"latitude">> => {float, {between, -90, 90}},
@@ -599,6 +675,10 @@ validate(#el_req{operation = create, gri = #gri{aspect = instance_dev},
             Common#{required => Required}
     end;
 
+validate(#el_req{operation = create, gri = #gri{aspect = provider_registration_token}}) ->
+    #{
+    };
+
 validate(#el_req{operation = create, gri = #gri{aspect = support}}) -> #{
     required => #{
         <<"token">> => {token, ?SPACE_SUPPORT_TOKEN},
@@ -610,6 +690,9 @@ validate(#el_req{operation = create, gri = #gri{aspect = {dns_txt_record, _}}}) 
     required => #{
         {aspect, <<"recordName">>} => {binary, non_empty},
         <<"content">> => {binary, non_empty}
+    },
+    optional => #{
+        <<"ttl">> => {integer, {not_lower_than, 0}}
     }
 };
 
@@ -636,7 +719,7 @@ validate(#el_req{operation = create, gri = #gri{aspect = verify_provider_identit
 
 validate(#el_req{operation = update, gri = #gri{aspect = instance}}) -> #{
     at_least_one => #{
-        <<"name">> => {binary, non_empty},
+        <<"name">> => {binary, name},
         <<"adminEmail">> => {binary, email},
         <<"latitude">> => {float, {between, -90, 90}},
         <<"longitude">> => {float, {between, -180, 180}}
@@ -651,8 +734,8 @@ validate(#el_req{operation = update, gri = #gri{aspect = {space, _}}}) -> #{
 
 validate(#el_req{operation = update, gri = #gri{aspect = domain_config},
     data = Data}) ->
-    {ok, SubdomainDelegationEnabled} = application:get_env(
-        ?APP_NAME, subdomain_delegation_enabled
+    SubdomainDelegationEnabled = application:get_env(
+        ?APP_NAME, subdomain_delegation_enabled, true
     ),
     case maps:get(<<"subdomainDelegation">>, Data, undefined) of
         true ->
@@ -766,3 +849,89 @@ get_min_support_size() ->
         oz_worker, minimum_space_support_size
     ),
     MinSupportSize.
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Sets the domain of a provider, ensuring the domain is not used
+%% by another provider.
+%% @end
+%%--------------------------------------------------------------------
+-spec update_provider_domain(ProviderId :: od_provider:id(),
+    Data :: entity_logic:data()) -> entity_logic:update_result().
+update_provider_domain(ProviderId, Data) ->
+    Domain = maps:get(<<"domain">>, Data),
+    Result = critical_section:run({domain_config, Domain}, fun() ->
+        case is_domain_occupied(Domain) of
+            {true, ProviderId} -> {ok, no_change};
+            {true, OtherProviderId} ->
+                ?debug("Refusing to set provider's ~s domain to ~s as it is used by provider ~s",
+                    [ProviderId, Domain, OtherProviderId]),
+                ?ERROR_BAD_VALUE_IDENTIFIER_OCCUPIED(<<"domain">>);
+            false ->
+                od_provider:update(ProviderId, fun(Provider) ->
+                    {ok, Provider#od_provider{
+                        subdomain_delegation = false,
+                        domain = Domain,
+                        subdomain = undefined
+                    }}
+                end)
+        end
+    end),
+    case Result of
+        {ok, _} ->
+            dns_state:remove_delegation_config(ProviderId),
+            ok;
+        Error -> Error
+    end.
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Updates provider to use given subdomain.
+%% @end
+%%--------------------------------------------------------------------
+-spec update_provider_subomain(ProviderId :: od_provider:id(),
+    Data :: entity_logic:data()) -> entity_logic:update_result().
+update_provider_subomain(ProviderId, Data) ->
+    Subdomain = maps:get(<<"subdomain">>, Data),
+    Domain = dns_config:build_fqdn_from_subdomain(Subdomain),
+    IPs = maps:get(<<"ipList">>, Data),
+    Result = case dns_state:set_delegation_config(ProviderId, Subdomain, IPs) of
+        ok ->
+            od_provider:update(ProviderId, fun(Provider) ->
+                {ok, Provider#od_provider{
+                    subdomain_delegation = true,
+                    domain = Domain,
+                    subdomain = Subdomain
+                }}
+            end);
+        {error, subdomain_exists} ->
+            ?ERROR_BAD_VALUE_IDENTIFIER_OCCUPIED(<<"subdomain">>)
+    end,
+    case Result of
+        {ok, _} -> ok;
+        Error -> Error
+    end.
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Checks whether provider with given domain exists. If yes, returns its id.
+%% @end
+%%--------------------------------------------------------------------
+-spec is_domain_occupied(Domain :: binary()) ->
+    {true, ProviderId :: od_provider:id()} | false.
+is_domain_occupied(Domain) ->
+    {ok, Providers} = od_provider:list(),
+    MatchingIds = [P#document.key ||
+        P <- Providers, P#document.value#od_provider.domain == Domain],
+    case MatchingIds of
+        % multiple results should not happen but older versions did not enforce
+        % unique domains
+        [Id | _] -> {true, Id};
+        [] -> false
+    end.

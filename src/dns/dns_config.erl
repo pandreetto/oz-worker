@@ -20,6 +20,7 @@
 -export([build_domain/2, build_fqdn_from_subdomain/1]).
 
 -type domain() :: binary().
+-type domain_entry() :: {domain(), [inet:ip4_address()]}.
 -type dns_config() :: {Name :: domain(), _Version :: <<>>, Records :: [#dns_rr{}]}.
 -export_type([domain/0, dns_config/0]).
 
@@ -47,7 +48,7 @@ build_domain(Subdomain, Domain) ->
 %%--------------------------------------------------------------------
 -spec build_fqdn_from_subdomain(Subdomain :: domain()) -> domain().
 build_fqdn_from_subdomain(Subdomain) ->
-    build_domain(Subdomain, get_onezone_domain()).
+    build_domain(Subdomain, oz_worker:get_domain()).
 
 
 %%--------------------------------------------------------------------
@@ -59,6 +60,7 @@ build_fqdn_from_subdomain(Subdomain) ->
 insert_config(Config) ->
     ok = erldns_zone_cache:put_zone(Config).
 
+
 %%--------------------------------------------------------------------
 %% @doc
 %% Builds dns config with up to date data, using provided IPs
@@ -68,39 +70,21 @@ insert_config(Config) ->
 -spec build_config() -> dns_config().
 build_config() ->
     OneZoneIPs = node_manager:get_cluster_ips(),
-    OneZoneDomain = get_onezone_domain(),
+    OneZoneDomain = oz_worker:get_domain(),
     AdminEmail = get_env(soa_admin_mailbox),
 
-    NSDomainsIPs = build_nameserver_domains(OneZoneDomain, OneZoneIPs),
-    {NSDomains, _} = lists:unzip(NSDomainsIPs),
-    PrimaryNS = hd(NSDomains),
+    OnezoneNS = build_onezone_ns_entries(OneZoneIPs),
 
-    ProviderDomains = build_provider_domains(OneZoneDomain),
-
-    % check if there are any overlapping records
-    StaticDomains = lists:filter(fun({Domain, _IP}) ->
-        case proplists:is_defined(Domain, ProviderDomains) of
-            false -> true;
-            _ ->
-                ?warning("Ignoring static subdomain entry for domain ~s "
-                "as the subdomain is already used by a provider.", [Domain]),
-                false
-        end
-    end, build_static_domains(OneZoneDomain)),
-
-    DomainsToIPS = [{OneZoneDomain, OneZoneIPs}
-                   | StaticDomains
-                   ++ NSDomainsIPs
-                   ++ ProviderDomains],
-
-    ARecords = lists:flatmap(fun({Domain, IPs}) ->
-        [build_record_a(Domain, IP) || IP <- IPs]
-    end, DomainsToIPS),
-    NSRecords = [build_record_ns(OneZoneDomain, NSHost) || NSHost <- NSDomains],
-    TxtRecords = lists:map(fun build_record_txt/1, get_txt_entries(OneZoneDomain)),
+    {PrimaryNS, _IPs} = hd(OnezoneNS),
     SOARecord = build_record_soa(OneZoneDomain, AdminEmail, PrimaryNS),
 
-    {OneZoneDomain, <<>>, [SOARecord | NSRecords ++ ARecords ++ TxtRecords]}.
+    {OneZoneDomain, <<>>, [
+        SOARecord |
+        build_a_records(OnezoneNS, OneZoneIPs) ++
+        build_ns_records(OnezoneNS) ++
+        build_txt_records() ++
+        build_mx_records() ++
+        build_cname_records()]}.
 
 
 %%%===================================================================
@@ -110,54 +94,69 @@ build_config() ->
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% Returns OneZone domain.
+%% Returns A records based on provider subdomains and entries in app config.
 %% @end
 %%--------------------------------------------------------------------
--spec get_onezone_domain() -> domain().
-get_onezone_domain() ->
-    {ok, Host} = application:get_env(?APP_NAME, http_domain),
-    list_to_binary(Host).
+-spec build_a_records(NSDomains :: [domain_entry()], OneZoneIPs :: [inet:ip4_address()]) ->
+    [#dns_rr{}].
+build_a_records(NSDomains, OneZoneIPs) ->
+    OneZoneDomain = oz_worker:get_domain(),
+
+    ProviderSubdomains = maps:to_list(dns_state:get_subdomains_to_ips()),
+
+    % check if there are any overlapping records
+    StaticSubdomains = filter_shadowed_entries(get_env(static_a_records, [])),
+
+    ProviderDomains = [{build_domain(Sub, OneZoneDomain), IPs}
+        || {Sub, IPs} <- ProviderSubdomains ++ StaticSubdomains],
+
+    Entries = [{OneZoneDomain, OneZoneIPs} | ProviderDomains ++ NSDomains],
+
+    lists:flatmap(fun({Domain, IPs}) ->
+        [build_record_a(Domain, IP) || IP <- IPs]
+    end, Entries).
+
 
 
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% Returns all domains for providers who requested a subdomain from onezone.
-%% Each provider's domain is mapped to a list of its IPs.
+%% Generates NS records based on onezone nodes
+%% and static entries in app config.
 %% @end
 %%--------------------------------------------------------------------
--spec build_provider_domains(OneZoneDomain :: domain()) ->
-    [{domain(), [inet:ip4_address()]}].
-build_provider_domains(OneZoneDomain) ->
-    SubdomainsIPs = dns_state:get_subdomains_to_ips(),
-    [{build_domain(Subdomain, OneZoneDomain), IPs}
-     || {Subdomain, IPs} <- maps:to_list(SubdomainsIPs)].
+-spec build_ns_records([domain_entry()]) -> [#dns_rr{}].
+build_ns_records(OneZoneNS) ->
+    OneZoneDomain = oz_worker:get_domain(),
+
+    OnezoneRecords =
+        [build_record_ns(OneZoneDomain, NSHost) || {NSHost, _} <- OneZoneNS],
+
+    StaticEntries = filter_shadowed_entries(get_env(static_ns_records, [])),
+    StaticRecords = lists:flatmap(fun({Subdomain, Nameservers}) ->
+        NSs = case Nameservers of
+            _ when is_list(Nameservers) -> Nameservers;
+            _ -> [Nameservers]
+        end,
+
+        Domain = build_domain(Subdomain, OneZoneDomain),
+        [build_record_ns(Domain, NS) || NS <- NSs]
+    end, StaticEntries),
+
+    OnezoneRecords ++ StaticRecords.
 
 
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% Get all TXT entries. Convert their values to strings
-%% as expected by erldns.
-%% @end
-%%--------------------------------------------------------------------
-get_txt_entries(OneZoneDomain) ->
-    SubdomainToRecord = dns_state:get_txt_records(),
-    [{build_domain(Name, OneZoneDomain), binary:bin_to_list(Content)}
-        || {Name, Content} <- SubdomainToRecord].
-
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Generate domains for subdomains "ns1", "ns2" etc. in the onezone
+%% Generates domains for subdomains "ns1", "ns2" etc. in the onezone
 %% domain to be used as nameserver addresses.
 %% @end
 %%--------------------------------------------------------------------
--spec build_nameserver_domains(OneZoneDomain :: domain(),
-    OneZoneIPs :: [inet:ip4_address()]) ->
-    [{domain(), [inet:ip4_address()]}].
-build_nameserver_domains(OneZoneDomain, OneZoneIPs) ->
+-spec build_onezone_ns_entries([inet:ip4_address()]) ->
+    [domain_entry()].
+build_onezone_ns_entries(OneZoneIPs) ->
+    OneZoneDomain = oz_worker:get_domain(),
     NSIPs = lists:sort(OneZoneIPs),
 
     % ensure minimum number of NS subdomains is met
@@ -183,14 +182,81 @@ build_nameserver_domains(OneZoneDomain, OneZoneIPs) ->
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% Generates domains based on subdomains given in the configuration file.
+%% Creates TXT dns records.
 %% @end
 %%--------------------------------------------------------------------
--spec build_static_domains(OneZoneDomain :: domain()) ->
-    [{domain(), [inet:ip4_address()]}].
-build_static_domains(OneZoneDomain) ->
-    Subdomains = get_env(static_entries, []),
-    [{build_domain(Sub, OneZoneDomain), IPs} || {Sub, IPs} <- Subdomains].
+-spec build_txt_records() -> [#dns_rr{}].
+build_txt_records() ->
+    OneZoneDomain = oz_worker:get_domain(),
+    ProviderEntries = dns_state:get_txt_records(),
+    StaticEntries = get_env(static_txt_records, []),
+
+    lists:map(fun
+        ({Name, {Content, undefined}}) ->
+            Domain = build_domain(Name, OneZoneDomain),
+            build_record_txt(Domain, Content);
+        ({Name, {Value, TTL}}) ->
+            Domain = build_domain(Name, OneZoneDomain),
+            build_record_txt(Domain, Value, TTL);
+        ({Name, Value}) ->
+            Domain = build_domain(Name, OneZoneDomain),
+            build_record_txt(Domain, Value)
+    end, ProviderEntries ++ StaticEntries).
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Creates MX dns records.
+%% @end
+%%--------------------------------------------------------------------
+-spec build_mx_records() -> [#dns_rr{}].
+build_mx_records() ->
+    OneZoneDomain = oz_worker:get_domain(),
+    StaticEntries = get_env(static_mx_records, []),
+
+    lists:map(fun({Subdomain, Mailserver, Preference}) ->
+        Domain = build_domain(Subdomain, OneZoneDomain),
+        build_record_mx(Domain, Mailserver, Preference)
+    end, StaticEntries).
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Creates CNAME dns records.
+%% @end
+%%--------------------------------------------------------------------
+-spec build_cname_records() -> [#dns_rr{}].
+build_cname_records() ->
+    OneZoneDomain = oz_worker:get_domain(),
+    StaticEntries = filter_shadowed_entries(get_env(static_cname_records, [])),
+
+    lists:map(fun({Subdomain, Target}) ->
+        Domain = build_domain(Subdomain, OneZoneDomain),
+        build_record_cname(Domain, Target)
+    end, StaticEntries).
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Filters out static entries for subdomains which are already used
+%% by a provider, logging the fact.
+%% @end
+%%--------------------------------------------------------------------
+filter_shadowed_entries(StaticEntries) ->
+    ProviderEntries = maps:to_list(dns_state:get_subdomains_to_ips()),
+    % check if there are any overlapping records
+    lists:filter(fun(Entry) ->
+        Subdomain = element(1, Entry), % not all tuples are 2-element, eg. MX entries
+        case proplists:is_defined(Subdomain, ProviderEntries) of
+            false -> true;
+            _ ->
+                ?warning("Ignoring static entry for subdomain \"~s\" "
+                "as the subdomain is already used by a provider.", [Subdomain]),
+                false
+        end
+    end, StaticEntries).
 
 
 %%--------------------------------------------------------------------
@@ -215,11 +281,11 @@ build_record_a(Domain, IP) ->
 %% Builds a dns SOA record for erldns.
 %% @end
 %%--------------------------------------------------------------------
--spec build_record_soa(Domain :: domain(), MainName :: domain(),
+-spec build_record_soa(Name :: domain(), MainName :: domain(),
     Admin :: binary()) -> #dns_rr{}.
-build_record_soa(Domain, MainName, Admin) ->
+build_record_soa(Name, MainName, Admin) ->
     #dns_rr{
-        name = Domain,
+        name = Name,
         type = ?DNS_TYPE_SOA,
         ttl = get_env(soa_ttl, 120),
         data = #dns_rrdata_soa{
@@ -233,27 +299,83 @@ build_record_soa(Domain, MainName, Admin) ->
        }
     }.
 
-
--spec build_record_ns(domain(), domain()) -> #dns_rr{}.
-build_record_ns(Domain, NSDomain) ->
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Builds a NS record for erldns.
+%% @end
+%%--------------------------------------------------------------------
+-spec build_record_ns(Name :: domain(), Nameserver :: domain()) -> #dns_rr{}.
+build_record_ns(Name, Nameserver) ->
     #dns_rr{
-        name = Domain,
+        name = Name,
         type = ?DNS_TYPE_NS,
         ttl = get_env(ns_ttl, 120),
-        data = #dns_rrdata_ns{dname = NSDomain}
+        data = #dns_rrdata_ns{dname = Nameserver}
     }.
 
 
--spec build_record_txt({domain(), binary()}) -> #dns_rr{}.
-build_record_txt({Domain, Content}) ->
-    build_record_txt(Domain, Content).
--spec build_record_txt(domain(), binary()) -> #dns_rr{}.
-build_record_txt(Domain, Content) ->
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Builds a TXT record for erldns. Binary content will be converted
+%% to string (list).
+%% @end
+%%--------------------------------------------------------------------
+-spec build_record_txt(domain(), binary() | string()) -> #dns_rr{}.
+build_record_txt(Domain, Value) ->
+    build_record_txt(Domain, Value, get_env(txt_ttl, 120)).
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Builds a TXT record for erldns with provided TTL.
+%% Binary content will be converted to string (list) as required
+%% by erl_dns.
+%% @end
+%%--------------------------------------------------------------------
+-spec build_record_txt(Domain :: domain(), Value :: binary() | string(),
+    TTL :: non_neg_integer()) -> #dns_rr{}.
+build_record_txt(Domain, Value, TTL) when is_binary(Value) ->
+    build_record_txt(Domain, binary:bin_to_list(Value), TTL);
+build_record_txt(Domain, Value, TTL) ->
     #dns_rr{
         name = Domain,
         type = ?DNS_TYPE_TXT,
-        ttl = get_env(txt_ttl, 120),
-        data = #dns_rrdata_txt{txt = Content}
+        ttl = TTL,
+        data = #dns_rrdata_txt{txt = Value}
+    }.
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Builds a MX record for erldns.
+%% @end
+%%--------------------------------------------------------------------
+-spec build_record_mx(domain(), domain(), integer()) -> #dns_rr{}.
+build_record_mx(Domain, Address, Preference) ->
+    #dns_rr{
+        name = Domain,
+        type = ?DNS_TYPE_MX,
+        ttl = get_env(mx_ttl, 120),
+        data = #dns_rrdata_mx{exchange = Address, preference = Preference}
+    }.
+
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Builds a CNAME record for erldns.
+%% @end
+%%--------------------------------------------------------------------
+-spec build_record_cname(domain(), domain()) -> #dns_rr{}.
+build_record_cname(Name, Target) ->
+    #dns_rr{
+        name = Name,
+        type = ?DNS_TYPE_CNAME,
+        ttl = get_env(cname_ttl, 120),
+        data = #dns_rrdata_cname{dname = Target}
     }.
 
 
@@ -265,7 +387,7 @@ build_record_txt(Domain, Content) ->
 %%--------------------------------------------------------------------
 -spec get_env(Key :: atom()) -> term().
 get_env(Key) ->
-    Props = application:get_env(?APP_NAME, dns, []),
+    Props = oz_worker:get_env(dns, []),
     case proplists:get_value(Key, Props) of
         undefined ->
             ?error("Failed to fetch property \"~p\" from dns config.", [Key]),
@@ -282,5 +404,5 @@ get_env(Key) ->
 %%--------------------------------------------------------------------
 -spec get_env(Key :: atom(), Default :: term()) -> term().
 get_env(Key, Default) ->
-    Props = application:get_env(?APP_NAME, dns, []),
+    Props = oz_worker:get_env(dns, []),
     proplists:get_value(Key, Props, Default).

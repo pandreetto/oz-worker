@@ -103,7 +103,10 @@ allowed_methods(Req, #state{allowed_methods = AllowedMethods} = State) ->
     Params :: '*' | [{binary(), binary()}],
     AcceptResource :: atom().
 content_types_accepted(Req, State) ->
-    {[{<<"application/json">>, accept_resource}], Req, State}.
+    case cowboy_req:has_body(Req) of
+        true -> {[{<<"application/json">>, accept_resource}], Req, State};
+        false -> {[{'*', accept_resource}], Req, State}
+    end.
 
 
 %%--------------------------------------------------------------------
@@ -219,7 +222,7 @@ rest_routes() ->
     % - prepend REST prefix to every route
     % - rest handler module must be added as second element to the tuples
     % - RoutesForPath will serve as Opts to rest handler init.
-    {ok, PrefixStr} = application:get_env(?APP_NAME, rest_api_prefix),
+    {ok, PrefixStr} = oz_worker:get_env(rest_api_prefix),
     Prefix = str_utils:to_binary(PrefixStr),
     lists:map(fun({Path, RoutesForPath}) ->
         {<<Prefix/binary, Path/binary>>, ?REST_HANDLER_MODULE, RoutesForPath}
@@ -289,7 +292,7 @@ send_response(#rest_resp{code = Code, headers = Headers, body = Body}, Req) ->
         {binary, Bin} ->
             Bin;
         Map ->
-            json_utils:encode_map(Map)
+            json_utils:encode(Map)
     end,
     cowboy_req:reply(Code, Headers, RespBody, Req).
 
@@ -515,7 +518,7 @@ get_data(Req) ->
     Data = try
         case Body of
             <<"">> -> #{};
-            _ -> json_utils:decode_map(Body)
+            _ -> json_utils:decode(Body)
         end
     catch _:_ ->
         throw(?ERROR_MALFORMED_DATA)

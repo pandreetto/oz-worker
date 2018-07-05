@@ -108,7 +108,7 @@ translate(?ERROR_MISSING_REQUIRED_VALUE(Key)) ->
         {<<"Missing required value: ~s">>, [Key]}
     };
 translate(?ERROR_MISSING_AT_LEAST_ONE_VALUE(Keys)) ->
-    KeysList = str_utils:join_binary(maps:keys(Keys), <<", ">>),
+    KeysList = str_utils:join_binary(Keys, <<", ">>),
     {?HTTP_400_BAD_REQUEST,
         {<<"Missing data, you must provide at least one of: ">>, [KeysList]}
     };
@@ -214,11 +214,21 @@ translate(?ERROR_BAD_VALUE_BAD_TOKEN_TYPE(Key)) ->
     {?HTTP_400_BAD_REQUEST,
         {<<"Bad value: provided \"~s\" is of invalid type">>, [Key]}
     };
-translate(?ERROR_BAD_VALUE_LOGIN) ->
+translate(?ERROR_BAD_VALUE_ALIAS) ->
     {?HTTP_400_BAD_REQUEST, <<
-        "Bad value: provided login must be 3-15 characters long and composed of letters and digits, "
-        "dashes and underscores are allowed (but not at the beginning or the end). "
-        "Use null value to unset the login."
+        "Bad value: provided alias must be 2-15 characters long and composed of letters and digits."
+        "Dashes and underscores are allowed (but not at the beginning or the end). "
+        "Use null value to unset the alias."
+    >>};
+translate(?ERROR_BAD_VALUE_NAME) ->
+    {?HTTP_400_BAD_REQUEST, <<
+        "Bad value: Name must be 2-50 characters long and composed of UTF-8 letters, digits, brackets and underscores."
+        "Dashes, spaces and dots are allowed (but not at the beginning or the end)."
+    >>};
+translate(?ERROR_BAD_VALUE_USER_NAME) ->
+    {?HTTP_400_BAD_REQUEST, <<
+        "Bad value: User name must be 2-50 characters long and composed of UTF-8 letters and digits."
+        "Dashes, spaces, dots, commas and apostrophes are allowed (but not at the beginning or the end). "
     >>};
 translate(?ERROR_BAD_VALUE_IDENTIFIER(Key)) ->
     {?HTTP_400_BAD_REQUEST, {
@@ -250,6 +260,8 @@ translate(?ERROR_CANNOT_DELETE_ENTITY(EntityType, EntityId)) ->
         <<"Cannot delete ~s, failed to delete some dependent relations">>,
         [EntityType:to_string(EntityId)]
     }};
+translate(?ERROR_CANNOT_JOIN_GROUP_TO_ITSELF) ->
+    {?HTTP_400_BAD_REQUEST, <<"Groups cannot join themselves.">>};
 translate(?ERROR_SUBDOMAIN_DELEGATION_DISABLED) ->
     {?HTTP_400_BAD_REQUEST, <<"Subdomain delegation is currently disabled.">>};
 translate(?ERROR_BAD_VALUE_EMAIL) ->

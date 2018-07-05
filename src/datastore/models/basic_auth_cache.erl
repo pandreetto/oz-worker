@@ -22,9 +22,6 @@
 %% datastore_model callbacks
 -export([get_ctx/0]).
 
--type record() :: #basic_auth_cache{}.
--type doc() :: datastore_doc:doc(record()).
-
 -define(CTX, #{
     model => ?MODULE,
     routing => local,
@@ -89,7 +86,9 @@ save(Login, Password, UserInfo) ->
 %% Deletes user info from cache.
 %% @end
 %%--------------------------------------------------------------------
--spec delete(Login :: binary()) -> ok | {error, term()}.
+-spec delete(Login :: undefined | binary()) -> ok | {error, term()}.
+delete(undefined) ->
+    ok;
 delete(Login) ->
     datastore_model:delete(?CTX, Login).
 

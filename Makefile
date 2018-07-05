@@ -51,11 +51,6 @@ compile:
 generate: template compile deps
 	$(REBAR) release $(OVERLAY_VARS)
 
-## Generates a dev release
-generate_dev: generate
-	# Try to get developer auth.config
-	./get_dev_auth_config.sh
-
 clean:
 	$(REBAR) clean
 
@@ -66,26 +61,31 @@ template:
 	sed "s/{build_version, \".*\"}/{build_version, \"${BUILD_VERSION}\"}/" ./rel/vars.config.template > ./rel/vars.config
 
 ##
+## Submodules
+##
+
+submodules:
+	git submodule sync --recursive ${submodule}
+	git submodule update --init --recursive ${submodule}
+
+##
 ## Release targets
 ##
 
 rel: generate
 
-test_rel: generate_dev cm_rel appmock_rel
+test_rel: rel cm_rel
 
 cm_rel:
 	mkdir -p cluster_manager/bamboos/gen_dev
+	make -C $(LIB_DIR)/cluster_manager/ submodules
 	cp -rf $(LIB_DIR)/cluster_manager/bamboos/gen_dev cluster_manager/bamboos
 	printf "\n{base_dir, \"$(BASE_DIR)/cluster_manager/_build\"}." >> $(LIB_DIR)/cluster_manager/rebar.config
 	make -C $(LIB_DIR)/cluster_manager/ rel
 	sed -i "s@{base_dir, \"$(PWD)/cluster_manager/_build\"}\.@@" $(LIB_DIR)/cluster_manager/rebar.config
 
-appmock_rel:
-	make -C appmock/ rel
-
 relclean:
 	rm -rf _build/rel/oz_worker
-	rm -rf appmock/_build/rel/appmock
 	rm -rf cluster_manager/_build/rel/cluster_manager
 
 ##
@@ -114,7 +114,7 @@ dialyzer:
 
 check_distribution:
 ifeq ($(DISTRIBUTION), none)
-	@echo "Please provide package distribution. Oneof: 'wily', 'fedora-23-x86_64'"
+	@echo "Please provide package distribution. Oneof: 'xenial', 'centos-7-x86_64'"
 	@exit 1
 else
 	@echo "Building package for distribution $(DISTRIBUTION)"
@@ -124,6 +124,7 @@ package/$(PKG_ID).tar.gz:
 	mkdir -p package
 	rm -rf package/$(PKG_ID)
 	git archive --format=tar --prefix=$(PKG_ID)/ $(PKG_REVISION) | (cd package && tar -xf -)
+	git submodule foreach "git archive --prefix=$(PKG_ID)/\$$path/ \$$sha1 | (cd \$$toplevel/package && tar -xf -)"
 	${MAKE} -C package/$(PKG_ID) upgrade deps
 	for dep in package/$(PKG_ID) package/$(PKG_ID)/$(LIB_DIR)/*; do \
 	     echo "Processing dependency: `basename $${dep}`"; \

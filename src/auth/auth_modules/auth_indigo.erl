@@ -18,7 +18,7 @@
 -include("datastore/oz_datastore_models.hrl").
 
 %% API
--export([get_redirect_url/2, validate_login/1, get_user_info/2]).
+-export([get_redirect_url/2, validate_login/2, get_user_info/2]).
 -export([normalized_membership_specs/2]).
 
 %%%===================================================================
@@ -31,8 +31,8 @@
 %% @end
 %%--------------------------------------------------------------------
 -spec get_redirect_url(auth_utils:idp(), boolean()) -> {ok, binary()} | {error, term()}.
-get_redirect_url(IdP, ConnectAccount) ->
-    auth_oauth2_common:get_redirect_url(ConnectAccount, IdP).
+get_redirect_url(IdP, LinkAccount) ->
+    auth_oauth2_common:get_redirect_url(LinkAccount, IdP).
 
 
 %%--------------------------------------------------------------------
@@ -40,11 +40,11 @@ get_redirect_url(IdP, ConnectAccount) ->
 %% See function specification in auth_module_behaviour.
 %% @end
 %%--------------------------------------------------------------------
--spec validate_login(auth_utils:idp()) ->
+-spec validate_login(auth_utils:idp(), QueryParams :: proplists:proplist()) ->
     {ok, #linked_account{}} | {error, term()}.
-validate_login(IdP) ->
+validate_login(IdP, QueryParams) ->
     auth_oauth2_common:validate_login(
-        IdP, secret_over_http_basic, access_token_in_url
+        IdP, QueryParams, secret_over_http_basic, access_token_in_url
     ).
 
 
@@ -71,10 +71,10 @@ get_user_info(IdP, AccessToken) ->
 %% be mapped to the same specs.
 %% @end
 %%--------------------------------------------------------------------
--spec normalized_membership_specs(auth_utils:idp(), proplists:proplist()) ->
+-spec normalized_membership_specs(auth_utils:idp(), maps:map()) ->
     [idp_group_mapping:membership_spec()].
-normalized_membership_specs(IdP, Props) ->
-    Groups = proplists:get_value(<<"groups">>, Props, []),
+normalized_membership_specs(IdP, Map) ->
+    Groups = maps:get(<<"groups">>, Map, []),
     VoId = vo_id(IdP),
     lists:map(
         fun(Group) ->

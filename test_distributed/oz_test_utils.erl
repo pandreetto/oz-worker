@@ -15,6 +15,7 @@
 -include("graph_sync/oz_graph_sync.hrl").
 -include("datastore/oz_datastore_models.hrl").
 -include("registered_names.hrl").
+-include("api_test_utils.hrl").
 -include_lib("ctool/include/test/test_utils.hrl").
 
 
@@ -127,6 +128,7 @@
 ]).
 -export([
     create_provider/2,
+    create_provider_registration_token/2,
     get_provider/2,
     list_providers/1,
     delete_provider/2,
@@ -195,7 +197,7 @@
 -export([
     create_session/3,
     get_gs_ws_url/1,
-    get_gs_supported_proto_verions/1,
+    get_gs_supported_proto_versions/1,
     decode_gri/2
 ]).
 
@@ -1132,7 +1134,7 @@ create_provider(Config, Name) when is_binary(Name) ->
     create_provider(Config, #{
         <<"name">> => Name,
         <<"adminEmail">> => <<"admin@onedata.org">>,
-        <<"domain">> => <<"127.0.0.1">>,
+        <<"domain">> => ?UNIQUE_DOMAIN,
         <<"subdomainDelegation">> => false,
         <<"latitude">> => 0.0,
         <<"longitude">> => 0.0
@@ -1143,6 +1145,19 @@ create_provider(Config, Data) ->
     )),
     {ok, MacaroonBin} = onedata_macaroons:serialize(Macaroon),
     {ok, {ProviderId, MacaroonBin}}.
+
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Creates a provider registration token.
+%% @end
+%%--------------------------------------------------------------------
+-spec create_provider_registration_token(Config :: term(),
+    Client :: entity_logic:client()) -> {ok, macaroon:macaroon()}.
+create_provider_registration_token(Config, Client) ->
+    ?assertMatch({ok, _}, call_oz(
+        Config, provider_logic, create_provider_registration_token, [Client]
+    )).
 
 
 %%--------------------------------------------------------------------
@@ -1866,7 +1881,7 @@ delete_all_entities(Config, RemovePredefinedGroups) ->
 %%--------------------------------------------------------------------
 -spec create_3_nested_groups(Config :: term(), TestUser :: od_user:id()) -> ok.
 create_3_nested_groups(Config, TestUser) ->
-    create_3_nested_groups(Config, TestUser, <<"gr">>, <<"gr">>, <<"gr">>).
+    create_3_nested_groups(Config, TestUser, <<"group">>, <<"group">>, <<"group">>).
 
 
 %%--------------------------------------------------------------------
@@ -1979,7 +1994,7 @@ unmock_handle_proxy(Config) ->
 %%--------------------------------------------------------------------
 -spec gui_ca_certs(Config :: term()) -> [public_key:der_encoded()].
 gui_ca_certs(Config) ->
-    call_oz(Config, gui_listener, get_cert_chain, []).
+    call_oz(Config, https_listener, get_cert_chain_pems, []).
 
 
 %%--------------------------------------------------------------------
@@ -2026,7 +2041,7 @@ get_env(Config, Application, Name) ->
 %%--------------------------------------------------------------------
 -spec get_rest_port(Config :: term()) -> {ok, Port :: inet:port_number()}.
 get_rest_port(Config) ->
-    get_env(Config, ?APP_NAME, gui_port).
+    get_env(Config, ?APP_NAME, https_server_port).
 
 
 %%--------------------------------------------------------------------
@@ -2060,7 +2075,7 @@ get_gs_ws_url(Config) ->
     {ok, GsPort} = get_rest_port(Config),
     str_utils:format_bin(
         "wss://~s:~B/~s",
-        [ZoneDomain, GsPort, string:strip(?GRAPH_SYNC_WS_PATH, both, $/)]
+        [ZoneDomain, GsPort, string:strip(?PROVIDER_GRAPH_SYNC_WS_PATH, both, $/)]
     ).
 
 
@@ -2069,9 +2084,9 @@ get_gs_ws_url(Config) ->
 %% Get supported graph sync protocol versions.
 %% @end
 %%--------------------------------------------------------------------
--spec get_gs_supported_proto_verions(Config :: term()) ->
+-spec get_gs_supported_proto_versions(Config :: term()) ->
     SupportedVersions :: [integer()].
-get_gs_supported_proto_verions(Config) ->
+get_gs_supported_proto_versions(Config) ->
     ?assertMatch([_ | _], call_oz(
         Config, gs_protocol, supported_versions, [])
     ).
